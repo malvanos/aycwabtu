@@ -37,11 +37,6 @@
 #define RESUMEFILENAME  "resume"
 #define FOUNDFILENAME   "keyfound"
 
-/****************** globals ***********************/
-/* store cw bytes 0..3 and 4 without checksum for easy incrementing */
-uint32 currentkey32     = 0;
-uint32 stopkey32        = -1;
-
 #if defined(_MSC_VER)
 #define ALIGNED_(x) __declspec(align(x))
 #else
@@ -110,14 +105,14 @@ void aycw_performance_start(void)
 }
 
 /* print performance measure to console */
-void aycw_perf_show(uint32_t currentkey32, uint32_t innerbatch)
+void aycw_perf_show(uint32_t currentkey32)
 {
    const char prop[] = "|/-\\";
 
 #ifdef _DEBUG
 #define DIVIDER 1
 #else
-#define DIVIDER 16      // reduce update frequency for release
+#define DIVIDER 32      // reduce update frequency for release
 #endif
 
    divider++; 
@@ -130,11 +125,11 @@ void aycw_perf_show(uint32_t currentkey32, uint32_t innerbatch)
       //printf(" time per %dk keys: %dms", KEYSPERINNERLOOP / 1000, deltaticks);
       if (deltaticks)
       {
-         printf(" %.3f Mcw/s ", ((float)innerbatch*KEYSPERINNERLOOP*DIVIDER / deltaticks / 1000));
+         printf(" %.3f Mcw/s ", ((float)KEYSPERINNERLOOP*DIVIDER / deltaticks / 1000));
       }
       if (totalticks)
       {
-         printf("avg: %.3f Mcw/s  ", ((float)innerbatch*KEYSPERINNERLOOP*DIVIDER / ((float)totalticks / totalloops)) / 1000);
+         printf("avg: %.3f Mcw/s  ", ((float)KEYSPERINNERLOOP*DIVIDER / ((float)totalticks / totalloops)) / 1000);
       }
       printf("%02X %02X %02X [] %02X .. .. []\r",
          currentkey32 >> 24,
@@ -145,7 +140,7 @@ void aycw_perf_show(uint32_t currentkey32, uint32_t innerbatch)
 }
 
 /* save to the current key to file to remember brute force progress */
-void aycw_write_resumefile(void)
+void aycw_write_resumefile(uint32_t currentkey32)
 {
    static int divider = 10;    /* long live the ssd */
    FILE * filehdl;
@@ -285,15 +280,16 @@ void aycw_welcome_banner(void)
 }
 
 /* Inner loop call */
-void process_block_of_keys(void *arg){
+void process_block_of_keys(void *arg)
+{
    ThreadInfo *info = arg;
 
-   mtx_lock(&info->mutex);
-   cnd_wait(&info->condvar, &info->mutex);
+   // mtx_lock(&info->mutex);
+   // cnd_wait(&info->condvar, &info->mutex);
 
    int k, i;
-   uint32 currentkey32     = info->startkey32;
-   uint32 stopkey32        = info->stopkey32;
+   uint32 currentkey32 = info->startkey32;
+   uint32 stopkey32 = info->stopkey32;
 
    dvbcsa_bs_word_t candidates; /* 1 marks a key candidate in the batch */
 
@@ -304,8 +300,12 @@ void process_block_of_keys(void *arg){
    dvbcsa_bs_word_t *bs_data_ib0 = info->bs_data_ib0;
 
    uint8 keylist[BS_BATCH_SIZE][8]; /* the list of keys for the batch run in non-bitsliced form */
+   
+   for (; currentkey32 <= stopkey32; currentkey32++)
+   {
+      aycw_performance_start();
 
-   /* bytes 5 + 6 belong to the inner loop
+/* bytes 5 + 6 belong to the inner loop
       aycw_bs_increment_keys_inner() increments every slice by one starting byte 5 LSB (bit 40)
       from byte 6 MSB down the slices spread key ranges.
       example: BS_BATCH_SIZE=32  -> topmost 5 bits of byte 6 (2^5==32) contain different values for batches
@@ -320,137 +320,141 @@ void process_block_of_keys(void *arg){
 #if BS_BATCH_SIZE > 256
 #error keylist calculation cannot yet handle BS_BATCH_SIZE>256
 #endif
-   for (i = 0; i < BS_BATCH_SIZE; i++)
-   {
-      keylist[i][0] = currentkey32 >> 24;
-      keylist[i][1] = currentkey32 >> 16;
-      keylist[i][2] = currentkey32 >> 8;
-      keylist[i][3] = keylist[i][0] + keylist[i][1] + keylist[i][2];
-      keylist[i][4] = currentkey32;
-      keylist[i][5] = 0;
-      keylist[i][6] = (0x0100 >> BS_BATCH_SHIFT) * i;
-      keylist[i][7] = keylist[i][4] + keylist[i][5] + keylist[i][6];
-   }
-   /***********************************************************************************************************************/
-   /***********************************************************************************************************************/
-   /***********************************************************************************************************************/
-   /************** block ***************/
-   dvbcsa_bs_word_t keys_bs[64]; // bit sliced keys for block
-   dvbcsa_bs_word_t keyskk[448]; // bit sliced scheduled keys (64 bit -> 448 bit)
-
-   aycw_key_transpose(&keylist[0][0], keys_bs); // transpose BS_BATCH_SIZE keys into bitsliced form
-
-   // check if all keys were transposed correctly
-   aycw_assert_key_transpose(&keylist[0][0], keys_bs);
-
-   // inner loop: process 2^16 keys - see aycw_bs_increment_keys_inner()
-   for (k = 0; k < KEYSPERINNERLOOP / BS_BATCH_SIZE; k++)
-   {
-
-      /* check if initial (outer) key and subsequent (inner) key batches are correct */
-      aycw_assertKeyBatch(keys_bs);
-
-      /************** stream ***************/
-      aycw_stream_decrypt(&bs_data_ib0[64], 25, keys_bs, bs_data_sb0); // 3 bytes required for PES check, 25 bits for some reason
-
-      aycw_assert_stream(&bs_data_ib0[64], 25, keys_bs, bs_data_sb0); // check if first bytes of IB1 output are correct
-
-#ifndef USEALLBITSLICE
-      aycw_bit2byteslice(&bs_data_ib0[64], 1);
-#endif
-
+      for (i = 0; i < BS_BATCH_SIZE; i++)
+      {
+         keylist[i][0] = currentkey32 >> 24;
+         keylist[i][1] = currentkey32 >> 16;
+         keylist[i][2] = currentkey32 >> 8;
+         keylist[i][3] = keylist[i][0] + keylist[i][1] + keylist[i][2];
+         keylist[i][4] = currentkey32;
+         keylist[i][5] = 0;
+         keylist[i][6] = (0x0100 >> BS_BATCH_SHIFT) * i;
+         keylist[i][7] = keylist[i][4] + keylist[i][5] + keylist[i][6];
+      }
+      /***********************************************************************************************************************/
+      /***********************************************************************************************************************/
+      /***********************************************************************************************************************/
       /************** block ***************/
-      for (i = 0; i < 8 * 8; i++)
+      dvbcsa_bs_word_t keys_bs[64]; // bit sliced keys for block
+      dvbcsa_bs_word_t keyskk[448]; // bit sliced scheduled keys (64 bit -> 448 bit)
+
+      aycw_key_transpose(&keylist[0][0], keys_bs); // transpose BS_BATCH_SIZE keys into bitsliced form
+
+      // check if all keys were transposed correctly
+      aycw_assert_key_transpose(&keylist[0][0], keys_bs);
+
+      // inner loop: process 2^16 keys - see aycw_bs_increment_keys_inner()
+      for (k = 0; k < KEYSPERINNERLOOP / BS_BATCH_SIZE; k++)
       {
-#ifdef USEBLOCKVIRTUALSHIFT
-         r[8 * 56 + i] = bs_data_ib0[i]; // r is the input/output working data for block
-#else                                    // restore after each block run
-         r[i] = bs_data_ib0[i];                  //
-#endif
-      }
 
-      /* block schedule key 64 bits -> 448 bits */ /* OPTIMIZEME: only the 16 inner bits in inner loop */
-      aycw_block_key_schedule(keys_bs, keyskk);
+         /* check if initial (outer) key and subsequent (inner) key batches are correct */
+         aycw_assertKeyBatch(keys_bs);
 
-      /* byte transpose */
+         /************** stream ***************/
+         aycw_stream_decrypt(&bs_data_ib0[64], 25, keys_bs, bs_data_sb0); // 3 bytes required for PES check, 25 bits for some reason
+
+         aycw_assert_stream(&bs_data_ib0[64], 25, keys_bs, bs_data_sb0); // check if first bytes of IB1 output are correct
+
 #ifndef USEALLBITSLICE
-      aycw_bit2byteslice(keyskk, 7); // 448 scheduled key bits / 64 key bits
+         aycw_bit2byteslice(&bs_data_ib0[64], 1);
 #endif
 
-      aycw_block_decrypt(keyskk, r); // r is the generated block output
-
-      {
-         /*#ifdef USEALLBITSLICE
-                     uint8 dump[8];
-                     aycw_extractbsdata(r, 0, 64, dump);
-                     printf("%02x %02x %02x %02x  %02x %02x %02x %02x\n",dump[0],dump[1],dump[2],dump[3],dump[4],dump[5],dump[6],dump[7]);
-         #else
-                     printf("%02x %02x %02x %02x  %02x %02x %02x %02x\n",(uint8)BS_EXTLS32(r[8 * 0]),(uint8)BS_EXTLS32(r[8 * 1]),(uint8)BS_EXTLS32(r[8 * 2]),(uint8)BS_EXTLS32(r[8 * 3]),(uint8)BS_EXTLS32(r[8 * 4]),(uint8)BS_EXTLS32(r[8 * 5]),(uint8)BS_EXTLS32(r[8 * 6]),(uint8)BS_EXTLS32(r[8 * 7]));
-         #endif*/
-      }
-
-      /************** block xor stream ***************/
-      aycw_bs_xor24(r, r, &bs_data_ib0[64]);
-
-      // for (i = 32; i < 64; i++) r[i] = BS_VAL8(55);   // destroy decrypted bytes 4...7 of DB0 shouldnt matter
-
-      aycw_assert_decrypt_result(probedata, keylist, r);
-
-      i = aycw_checkPESheader(r, &candidates); /* OPTIMIZEME: return value should be first possible slice number to let the loop below start right there */
-      if (i)
-      {
-         // candidate keys marked with '1' for the last batch run
-         // printf("\n %d key candidate(s) found\n", i);
-         for (i = 0; i < BS_BATCH_SIZE; i++)
+         /************** block ***************/
+         for (i = 0; i < 8 * 8; i++)
          {
-            unsigned char cw[8];
-            dvbcsa_key_t key;
-            unsigned char data[16];
-            memset(cw, 255, 8);
-            if (1 == BS_EXTLS32(BS_AND(BS_SHR(candidates, i), BS_VAL8(01))))
+#ifdef USEBLOCKVIRTUALSHIFT
+            r[8 * 56 + i] = bs_data_ib0[i]; // r is the input/output working data for block
+#else                                       // restore after each block run
+            r[i] = bs_data_ib0[i];               //
+#endif
+         }
+
+         /* block schedule key 64 bits -> 448 bits */ /* OPTIMIZEME: only the 16 inner bits in inner loop */
+         aycw_block_key_schedule(keys_bs, keyskk);
+
+         /* byte transpose */
+#ifndef USEALLBITSLICE
+         aycw_bit2byteslice(keyskk, 7); // 448 scheduled key bits / 64 key bits
+#endif
+
+         aycw_block_decrypt(keyskk, r); // r is the generated block output
+
+         {
+            /*#ifdef USEALLBITSLICE
+                        uint8 dump[8];
+                        aycw_extractbsdata(r, 0, 64, dump);
+                        printf("%02x %02x %02x %02x  %02x %02x %02x %02x\n",dump[0],dump[1],dump[2],dump[3],dump[4],dump[5],dump[6],dump[7]);
+            #else
+                        printf("%02x %02x %02x %02x  %02x %02x %02x %02x\n",(uint8)BS_EXTLS32(r[8 * 0]),(uint8)BS_EXTLS32(r[8 * 1]),(uint8)BS_EXTLS32(r[8 * 2]),(uint8)BS_EXTLS32(r[8 * 3]),(uint8)BS_EXTLS32(r[8 * 4]),(uint8)BS_EXTLS32(r[8 * 5]),(uint8)BS_EXTLS32(r[8 * 6]),(uint8)BS_EXTLS32(r[8 * 7]));
+            #endif*/
+         }
+
+         /************** block xor stream ***************/
+         aycw_bs_xor24(r, r, &bs_data_ib0[64]);
+
+         // for (i = 32; i < 64; i++) r[i] = BS_VAL8(55);   // destroy decrypted bytes 4...7 of DB0 shouldnt matter
+
+         aycw_assert_decrypt_result(probedata, keylist, r);
+
+         i = aycw_checkPESheader(r, &candidates); /* OPTIMIZEME: return value should be first possible slice number to let the loop below start right there */
+         if (i)
+         {
+            // candidate keys marked with '1' for the last batch run
+            // printf("\n %d key candidate(s) found\n", i);
+            for (i = 0; i < BS_BATCH_SIZE; i++)
             {
-               // candidate bit set, now extract the key bits
-               aycw_extractbsdata(keys_bs, i, 64, cw);
-
-               dvbcsa_key_set(&cw, &key);
-
-               memcpy(&data, &probedata[0], 16);
-               dvbcsa_decrypt(&key, data, 16);
-               if (data[0] != 0x00 || data[1] != 0x00 || data[2] != 0x01)
+               unsigned char cw[8];
+               dvbcsa_key_t key;
+               unsigned char data[16];
+               memset(cw, 255, 8);
+               if (1 == BS_EXTLS32(BS_AND(BS_SHR(candidates, i), BS_VAL8(01))))
                {
-                  /* bitslice and regular implementations calculated different results - should never happen */
-                  printf("\nFatal error: candidate verification failed!\n");
-                  printf("last key was: %02X %02X %02X [%02X]  %02X %02X %02X [%02X]\n",
-                         cw[0], cw[1], cw[2], cw[3], cw[4], cw[5], cw[6], cw[7]);
-                  exit(ERR_FATAL);
-               }
+                  // candidate bit set, now extract the key bits
+                  aycw_extractbsdata(keys_bs, i, 64, cw);
 
-               memcpy(&data, &probedata[1], 16);
-               dvbcsa_decrypt(&key, data, 16);
-               if (data[0] == 0x00 && data[1] == 0x00 && data[2] == 0x01)
-               {
-                  memcpy(&data, &probedata[2], 16);
+                  dvbcsa_key_set(&cw, &key);
+
+                  memcpy(&data, &probedata[0], 16);
+                  dvbcsa_decrypt(&key, data, 16);
+                  if (data[0] != 0x00 || data[1] != 0x00 || data[2] != 0x01)
+                  {
+                     /* bitslice and regular implementations calculated different results - should never happen */
+                     printf("\nFatal error: candidate verification failed!\n");
+                     printf("last key was: %02X %02X %02X [%02X]  %02X %02X %02X [%02X]\n",
+                            cw[0], cw[1], cw[2], cw[3], cw[4], cw[5], cw[6], cw[7]);
+                     exit(ERR_FATAL);
+                  }
+
+                  memcpy(&data, &probedata[1], 16);
                   dvbcsa_decrypt(&key, data, 16);
                   if (data[0] == 0x00 && data[1] == 0x00 && data[2] == 0x01)
                   {
-                     printf("\nkey candidate successfully decrypted three packets\n");
-                     printf("KEY FOUND!!!    %02X %02X %02X [%02X]  %02X %02X %02X [%02X]\n",
-                            cw[0], cw[1], cw[2], cw[3], cw[4], cw[5], cw[6], cw[7]);
+                     memcpy(&data, &probedata[2], 16);
+                     dvbcsa_decrypt(&key, data, 16);
+                     if (data[0] == 0x00 && data[1] == 0x00 && data[2] == 0x01)
+                     {
+                        printf("\nkey candidate successfully decrypted three packets\n");
+                        printf("KEY FOUND!!!    %02X %02X %02X [%02X]  %02X %02X %02X [%02X]\n",
+                               cw[0], cw[1], cw[2], cw[3], cw[4], cw[5], cw[6], cw[7]);
 
-                     if (!benchmark)
-                        aycw_write_keyfoundfile(cw);
-                     exit(OK);
+                        if (!benchmark)
+                           aycw_write_keyfoundfile(cw);
+                        exit(OK);
+                     }
                   }
                }
             }
          }
-      }
 
-      // set up the next BS_BATCH_SIZE keys
-      aycw_bs_increment_keys_inner(keys_bs);
+         // set up the next BS_BATCH_SIZE keys
+         aycw_bs_increment_keys_inner(keys_bs);
 
-   } // inner loop
-   return 0;
+      } // inner loop
+
+      aycw_perf_show(currentkey32);
+
+      // if (!benchmark) aycw_write_resumefile();
+   }
 }
 
 void usage(void) {
@@ -483,9 +487,11 @@ int main(int argc, char *argv[])
    int      i, k;
    int      benchmark = 0;
    int      selftest = 0;
+   int      num_threads = 1;
    int      opt;
    char*    tsfile = NULL;
    unsigned char probedata[3][16];
+   uint32_t currentkey32, stopkey32;
 
 
    /************** stream ***************/
@@ -505,12 +511,15 @@ int main(int argc, char *argv[])
    uint8 keylist[BS_BATCH_SIZE][8];     /* the list of keys for the batch run in non-bitsliced form */
 
 
-    while((opt = getopt(argc, argv, "t:a:o:bs")) != -1) 
+    while((opt = getopt(argc, argv, "t:p:a:o:bs")) != -1) 
     { 
         switch(opt) 
         { 
             case 't': 
                 tsfile = optarg;
+                break; 
+            case 'p': 
+                num_threads = atol(optarg);
                 break; 
             case 'a': 
                 currentkey32 = ayc_scan_cw_param(optarg);
@@ -559,10 +568,12 @@ int main(int argc, char *argv[])
        /************ dummy data for benchmark run *****************/
        /* first two 8 byte data blocks from three different encrypted ts packets for brute force attack.
           initialized with test data for benchmark run */
-       unsigned char probedata[3][16] = {
+       unsigned char lprobedata[3][16] = {
           { 0xB2, 0x74, 0x85, 0x51, 0xF9, 0x3C, 0x9B, 0xD2,  0x30, 0x9E, 0x8E, 0x78, 0xFB, 0x16, 0x55, 0xA9},
           { 0x25, 0x2D, 0x3D, 0xAB, 0x5E, 0x3B, 0x31, 0x39,  0xFE, 0xDF, 0xCD, 0x84, 0x51, 0x5A, 0x86, 0x4A},
           { 0xD0, 0xE1, 0x78, 0x48, 0xB3, 0x41, 0x63, 0x22,  0x25, 0xA3, 0x63, 0x0A, 0x0E, 0xD3, 0x1C, 0x70} };
+
+       memcpy(probedata, lprobedata, 3*16*sizeof(unsigned char));
        currentkey32 = 0x00 << 24 | 0x11 << 16 | 0x15 << 8 | 0x00;
        /* key   00 11 22 33  44 00 00 44 decrypts to
                    000001ff11111111aa11111111111155
@@ -581,8 +592,6 @@ int main(int argc, char *argv[])
       (uint8)(currentkey32 >> 24), (uint8)(currentkey32 >> 16), (uint8)(currentkey32 >> 8), (uint8)currentkey32,0,0);
    printf("stop key is  %02X %02X %02X [] %02X %02X %02X []\n",
       (uint8)(stopkey32 >> 24), (uint8)(stopkey32 >> 16), (uint8)(stopkey32 >> 8), (uint8)stopkey32, 0xFF, 0xFF);
-      printf("will run from %u to %u\n", currentkey32, stopkey32);
-
 
 #ifdef WIN32
    SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS);
@@ -600,62 +609,32 @@ int main(int argc, char *argv[])
    aycw_bit2byteslice(bs_data_ib0, 1);
 #endif
 
-#define INNERBATCH 128
-#define THREADS 4
+   ThreadInfo threads[num_threads];
 
-   ThreadInfo threads[THREADS];
-
-   uint32_t total_keys_per_thread = (stopkey32 - currentkey32 + 1) / THREADS;
-   for (int i=0; i<THREADS; i++){
+   uint32_t total_keys_per_thread = (stopkey32 - currentkey32 + 1) / num_threads;
+   for (int i=0; i<num_threads; i++){
       mtx_init(&threads[i].mutex, mtx_plain);
       cnd_init(&threads[i].condvar);
       memcpy(threads[i].probedata, probedata, 3*16*sizeof(unsigned char));
       memcpy(threads[i].bs_data_sb0, bs_data_sb0, 8*16*sizeof(dvbcsa_bs_word_t));
       memcpy(threads[i].bs_data_ib0, bs_data_ib0, 8*16*sizeof(dvbcsa_bs_word_t));
       threads[i].startkey32 = currentkey32 + i*total_keys_per_thread;
-      threads[i].stopkey32 = currentkey32 + (i+1)*total_keys_per_thread;
+      threads[i].stopkey32 = currentkey32 + (i+1)*total_keys_per_thread -1;
 
       printf("Thread %d will run from %02X %02X %02X [] %02X %02X %02X [] to %02X %02X %02X [] %02X %02X %02X []\n",
       i,
       (uint8)(threads[i].startkey32 >> 24), (uint8)(threads[i].startkey32 >> 16), (uint8)(threads[i].startkey32 >> 8), (uint8)threads[i].startkey32,0,0,
       (uint8)(threads[i].stopkey32 >> 24), (uint8)(threads[i].stopkey32 >> 16), (uint8)(threads[i].stopkey32 >> 8), (uint8)threads[i].stopkey32,0,0
       );
-
    }
 
-
-   for (i=0; i<THREADS; i++){
-      thrd_create(&threads[i].thread, process_block_of_keys, &threads[i]);
-      // process_block_of_keys(currentkey32+i, probedata, bs_data_sb0, bs_data_ib0, benchmark);
+   for (i=0; i<num_threads; i++){
+      //thrd_create(&threads[i].thread, process_block_of_keys, &threads[i]);
+      process_block_of_keys(&threads[i]);
    }
 
-    // cnd_broadcast();
-    //thrd_join(&thread, &result);
-
-   /************* outer loop ******************/
-   // run over whole key search space
-   // key bytes incremented: 0 + 1 + 2 + 4 
-   while (currentkey32 <= stopkey32)
-   {
-      aycw_performance_start();
-
-
-      
-
-      int result;
-      for (i=0; i<THREADS; i++){
-             thrd_join(&threads[i].thread, &result);
-      }
-      exit(0);
-      aycw_perf_show(aycw_perf_show, INNERBATCH);
-
-      if (!benchmark) aycw_write_resumefile();
-
-      currentkey32 += INNERBATCH;   // prepare for next threads * 2^16 keys
-
-   };  // while (currentkey32 < stopkey32)
-
-   for (int i=0; i<THREADS; i++){
+   for (i=0; i<num_threads; i++){
+      thrd_join(threads[i].thread, NULL);
       mtx_destroy(&threads[i].mutex);
       cnd_destroy(&threads[i].condvar);
    }

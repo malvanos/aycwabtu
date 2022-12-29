@@ -11,7 +11,7 @@ CFLAGS      = \
     -w                                  \
     -I src/libdvbcsa/dvbcsa             \
     -msse2  -msse4.2                    \
-    -O2                                 \
+    -O2 -g                              \
     -DGITHASH=\"$(GITHASH)\" 
 
 obj/%.o : src/%.c
@@ -19,13 +19,13 @@ obj/%.o : src/%.c
 	$(CC) -c -MD $(CFLAGS)-o obj/$*.o $<
 
 ayc_src = \
-	main.c             \
-	bs_algo.c          \
-	bs_block.c         \
-	bs_block_ab.c      \
+	main.c             	\
+	bs_algo.c          	\
+	bs_block.c         	\
+	bs_block_ab.c      	\
 	bs_sse2.c     		\
-	bs_stream.c        \
-	bs_uint32.c	    \
+	bs_stream.c        	\
+	bs_uint32.c	    	\
 	ts.c
 
 tsgen_src = tsgen.c
@@ -44,7 +44,7 @@ all: aycwabtu
    
 
 aycwabtu: $(ayc_obj) $(libdvbcsa_obj)
-	$(LD) -static -s -o $@ $(ayc_obj) $(libdvbcsa_obj)
+	$(LD) -g -o $@ $(ayc_obj) $(libdvbcsa_obj)
 	@echo $@ created
 
 tsgen: $(tsgen_obj) $(libdvbcsa_obj)
