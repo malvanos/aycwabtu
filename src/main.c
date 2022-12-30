@@ -2,12 +2,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>         /* getopt() */
 
-#ifdef WIN32
-#  include <windows.h>
+
+#ifdef _MSC_VER
+#include <windows.h>
 #else
-#  include <time.h>
+#include <time.h>
+#include <unistd.h>         /* getopt() */
 #endif
 
 #include "config.h"
@@ -241,7 +242,12 @@ void aycw_partsbench(void)
 
 void aycw_welcome_banner(void)
 {
+#ifdef _MSC_VER
+    printf("AYCWABTU CSA brute forcer %s %d Windows built on %s", VERSION, _MSC_VER, __DATE__);
+#else
    printf("AYCWABTU CSA brute forcer %s %s built on %s", VERSION, GITHASH, __DATE__);
+#endif
+
 #ifdef _DEBUG
    printf(" DEBUG");
 #endif
@@ -308,6 +314,9 @@ int main(int argc, char *argv[])
 
    uint8 keylist[BS_BATCH_SIZE][8];     /* the list of keys for the batch run in non-bitsliced form */
 
+#ifdef _MSC_VER
+    benchmark = 1;
+#else
 
     while((opt = getopt(argc, argv, "t:a:o:bs")) != -1) 
     { 
@@ -340,6 +349,7 @@ int main(int argc, char *argv[])
         printf("unknown command: %s\n", argv[optind]); 
         usage();
     }
+#endif
 
     /* check parameter plausibility */
     if ((!benchmark) && (!tsfile))
