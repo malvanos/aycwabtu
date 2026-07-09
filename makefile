@@ -16,6 +16,8 @@ CFLAGS      = \
     -std=c++17                          \
     -I src/libdvbcsa/dvbcsa             \
     -O2                                 \
+    -flto                               \
+    -march=native                       \
     -DGITHASH=\"$(GITHASH)\"
 
 ifeq ($(UNAME_M),x86_64)
@@ -24,7 +26,7 @@ else
     CFLAGS += -DPARALLEL_MODE=1
 endif
 
-LDFLAGS     =
+LDFLAGS     = -flto
 ifeq ($(UNAME_S),Linux)
     LDFLAGS += -static -s
 endif
