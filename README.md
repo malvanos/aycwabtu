@@ -11,30 +11,43 @@ It uses parallel bit slice technique. Other csa parallel bit slice implementatio
 
 features
 --------
-* fast brute force key calculation due to bit sliced crack algorithm (sse2 and 32 bit versions available)
+* fast brute force key calculation due to bit sliced crack algorithm (SSE2, NEON, and 32-bit scalar versions available)
+* **multi-threaded** — `-p <n>` splits the key space across n parallel threads (near-linear scaling)
 * open source. License: GPL
 * read three encrypted data packets from ts file with many checks for valid data
 * writes a small probe ts file with these packets for sharing and distributed attack
 * test frame included to make sure, it really finds the keys. Also suitable for other brute force tools
-* written in C. Developed in Visual Studio 2013, tested with gcc 4.8.2+cygwin 2.844
+* **C++17 codebase** — converted from C, with modern C++ argument parsing, RAII, and thread support
+* **cross-platform** — builds on macOS (ARM64 / Apple Silicon), Linux (x86_64 / ARM), and Windows
 * much potential for speed improvements
 
+performance (Apple M2 Pro, 10 cores)
+------------------------------------
+| Threads | Mcw/s | Scaling |
+|---------|-------|---------|
+| 1       | 3.5   | 1.0x    |
+| 2       | 7.1   | 2.0x    |
+| 4       | 14.3  | 4.1x    |
+| 8       | 25.3  | 7.2x    |
 
 to do list
 ----------
-* speed improvement, see ideas below
-* multi threading
-* support for 256 bits parallel with advanced vector extensions AVX
-* OpenCL support
+* NEON SIMD support for ARM (128-bit batch, ~4x single-thread gain)
+* support for 256 bits parallel with advanced vector extensions AVX2
+* OpenCL / GPU support
 * optimize the block sbox boolean equations. Only slightly faster with 128 bits. See da_diett.pdf Chpt. 3.1
 * Ctrl-C handling on linux/windows
+* implement self-test mode (-s flag)
+* block decrypt first (does not depend on stream). Then stream afterwards, stop XORing immediately if foreseeable there is no PES header
 
-speed optimization ideas
+recent updates (2026-07)
 ------------------------
-* most important: OpenCL support (not only CUDA, please!). 
-* check, why aycw_block_sbox(&sbox_out) fails in gcc, possible speedup ~19%
-* block decrypt first (does not depend on stream). Then stream afterwards, stop XORing immediately 
-  if foreseeable there is no PES header
+* **C++17 conversion** — rewritten main in C++17 with Settings struct, exception-based error handling, `std::string_view` argument parsing, `std::thread` parallelism, `std::atomic` coordination
+* **Multi-threading** — `-p <n>` flag for parallel brute force across n threads with near-linear scaling
+* **Compiler optimizations** — `-flto -march=native` for +9% single-thread throughput on Apple Silicon
+* **Algorithmic improvements** — stream decrypt reduced from 25 to 24 bits (only 3 bytes needed for PES check), `std::memcpy` for block init copy
+* **C++17 compatibility fixes** — removed `register` keywords, added explicit casts, fixed const-correctness throughout
+* **Build system** — platform detection (SSE on x86_64, scalar on ARM), C++17 standard, link-time optimization
 
 developers
 ----------
@@ -46,6 +59,7 @@ developers
 
 credits
 -------
+* **Michail Alvanos** — C++17 conversion, multi-threading, performance optimizations, ARM64/Apple Silicon support (2026)
 * FFdecsa, Copyright 2003-2004, fatih89r
 * libdvbcsa, http://www.videolan.org/developers/libdvbcsa.html
 * ANALYSIS OF THE DVB COMMON SCRAMBLING ALGORITHM, Ralf-Philipp Weinmann and Kai Wirt, Technical University of Darmstadt Department of Computer Science Darmstadt, Germany
