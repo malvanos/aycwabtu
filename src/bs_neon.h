@@ -30,29 +30,24 @@ static inline uint32x4_t neon_set_epi32(uint32_t n, uint32_t m,
 #define BS_XOREQ(a, b)  { dvbcsa_bs_word_t *_t = &(a); *_t = veorq_u32(*_t, (b)); }
 #define BS_NOT(a)       vmvnq_u32(a)
 
-/* Runtime 128-bit bitwise shift — same approach as SSE: cast to
-   __uint128_t, shift, cast back.  Per-lane NEON shifts would lose
-   carry bits between 32-bit lanes, which is incorrect for bitsliced
-   operations that treat the 128-bit word as a single bit-vector. */
+/* 128-bit bitwise shift via union type-punning.  The compiler (Clang -O2)
+   eliminates the union entirely and generates optimal lane-extract/shift/
+   lane-insert sequences identical to hand-written NEON intrinsics. */
 static inline uint32x4_t neon_shl(uint32x4_t v, int n) {
-    __uint128_t x;
-    __builtin_memcpy(&x, &v, sizeof(x));
-    x <<= n;
-    __builtin_memcpy(&v, &x, sizeof(x));
-    return v;
+    union { uint32x4_t v; __uint128_t x; } u = {v};
+    u.x <<= n;
+    return u.v;
 }
 static inline uint32x4_t neon_shr(uint32x4_t v, int n) {
-    __uint128_t x;
-    __builtin_memcpy(&x, &v, sizeof(x));
-    x >>= n;
-    __builtin_memcpy(&v, &x, sizeof(x));
-    return v;
+    union { uint32x4_t v; __uint128_t x; } u = {v};
+    u.x >>= n;
+    return u.v;
 }
 
 #define BS_SHL(a, n)    neon_shl((a), (n))
 #define BS_SHR(a, n)    neon_shr((a), (n))
 
-/* Byte-level shifts — just delegate to the 128-bit bit shift (n bytes = n*8 bits) */
+/* Byte shifts — just delegate to bit shift (n bytes = n*8 bits) */
 #define BS_SHL8(a, n)   neon_shl((a), (n) * 8)
 #define BS_SHR8(a, n)   neon_shr((a), (n) * 8)
 
