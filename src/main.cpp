@@ -9,6 +9,8 @@
 #include <chrono>
 #include <functional>
 #include <string_view>
+#include <thread>
+#include <atomic>
 
 #include "config.h"
 #include "bs_stream.h"
@@ -35,6 +37,7 @@ struct Settings {
         , selftest(false)
         , keystart(0)
         , keystop(0xFFFFFFFF)
+        , numThreads(1)
     {}
 
     bool     benchmark;
@@ -42,12 +45,18 @@ struct Settings {
     string   tsFilename;
     uint32_t keystart;
     uint32_t keystop;
+    int      numThreads;
 };
 
 /* --------------------------------------------------------------------------
    Forward declarations
    -------------------------------------------------------------------------- */
-static void bruteForce(const Settings& settings, unsigned char probedata[3][16]);
+static void bruteForceRange(uint32_t keyStart, uint32_t keyStop,
+                            const unsigned char probedata[3][16],
+                            bool isBenchmark, int tid, int nThreads,
+                            atomic<int>& keyFound);
+static void bruteForceParallel(const Settings& settings,
+                               unsigned char probedata[3][16]);
 
 /* --------------------------------------------------------------------------
    Utility: hex print
@@ -86,7 +95,7 @@ static void bfPerformanceStart(BFState& st) {
     if (!st.divider) st.time_start = getTicksMs();
 }
 
-static void bfPerfShow(BFState& st) {
+static void bfPerfShow(BFState& st, int tid) {
     const char prop[] = "|/-\\";
 
 #ifdef _DEBUG
@@ -110,11 +119,20 @@ static void bfPerfShow(BFState& st) {
             printf("avg: %.3f Mcw/s  ",
                    ((float)KEYSPERINNERLOOP * DIVIDER / ((float)st.totalticks / st.totalloops)) / 1000);
         }
-        printf("%02X %02X %02X [] %02X .. .. []\r",
-               st.currentkey32 >> 24,
-               st.currentkey32 >> 16 & 0xFF,
-               st.currentkey32 >> 8 & 0xFF,
-               st.currentkey32 & 0xFF);
+        if (tid >= 0) {
+            printf("[T%d] %02X %02X %02X [] %02X .. .. []\r",
+                   tid,
+                   st.currentkey32 >> 24,
+                   st.currentkey32 >> 16 & 0xFF,
+                   st.currentkey32 >> 8 & 0xFF,
+                   st.currentkey32 & 0xFF);
+        } else {
+            printf("%02X %02X %02X [] %02X .. .. []\r",
+                   st.currentkey32 >> 24,
+                   st.currentkey32 >> 16 & 0xFF,
+                   st.currentkey32 >> 8 & 0xFF,
+                   st.currentkey32 & 0xFF);
+        }
     }
 #undef DIVIDER
 }
@@ -122,12 +140,17 @@ static void bfPerfShow(BFState& st) {
 /* --------------------------------------------------------------------------
    Resume file
    -------------------------------------------------------------------------- */
-static void bfWriteResumeFile(BFState& st) {
+static void bfWriteResumeFile(BFState& st, int tid) {
     static int divider = 10;
     divider++;
     divider &= 0x1ff;
     if (!divider) {
-        FILE *f = fopen(RESUMEFILENAME, "w");
+        char fname[64];
+        if (tid >= 0)
+            snprintf(fname, sizeof(fname), "%s-%d", RESUMEFILENAME, tid);
+        else
+            snprintf(fname, sizeof(fname), "%s", RESUMEFILENAME);
+        FILE *f = fopen(fname, "w");
         if (f) {
             char buf[64];
             sprintf(buf, "%02X %02X %02X %02X %02X %02X %02X %02X\n",
@@ -187,6 +210,7 @@ static void printUsage() {
     printf("   -a start cw      cw to start the brute force attack with. Checksum\n");
     printf("                    bytes are omittted, e.g. 112233556677 [000000000000]\n");
     printf("   -o stop cw       when this cw is reached, program terminates [FFFFFFFFFFFF]\n");
+    printf("   -p threads       number of parallel threads (default: 1)\n");
     printf("   -b               start benchmark run with internal demo ts data and quit\n");
     printf("   -s               execute algorithm self test and quit\n");
     printf("   -h               print this help message and quit\n");
@@ -203,10 +227,6 @@ static uint32_t scan_cw_param(const char *s) {
 }
 
 static Settings parse(int argc, char *argv[]) {
-    if (argc > 6) {
-        throw runtime_error("too many input parameters!");
-    }
-
     const vector<string_view> args(argv + 1, argv + argc);
     Settings settings;
 
@@ -232,14 +252,23 @@ static Settings parse(int argc, char *argv[]) {
             continue;
         }
 
+        if (*it == "-p") {
+            it++;
+            if (it == args.end()) throw runtime_error("Missing argument for -p");
+            settings.numThreads = stoi(string(*it));
+            if (settings.numThreads < 1)
+                throw runtime_error("Thread count must be >= 1");
+            continue;
+        }
+
         if (*it == "-b") {
             settings.benchmark = true;
-            return settings;
+            continue;
         }
 
         if (*it == "-s") {
             settings.selftest = true;
-            return settings;
+            continue;
         }
 
         if (*it == "-h") {
@@ -262,7 +291,11 @@ static void printBanner(const Settings& settings) {
 #ifdef _DEBUG
     cout << " DEBUG";
 #endif
-    cout << "\nCPU only, single threaded version";
+    cout << "\nCPU only";
+    if (settings.numThreads > 1)
+        cout << ", " << settings.numThreads << " threads";
+    else
+        cout << ", single threaded";
 #ifdef USEALLBITSLICE
     cout << " - all bit slice (bool sbox)";
 #else
@@ -322,8 +355,6 @@ static void benchmark(Settings& settings) {
 
     cout << "Starting benchmarking" << endl;
 
-    /* first two 8 byte data blocks from three different encrypted ts packets.
-       Initialized with test data for benchmark run. */
     unsigned char probedata[3][16] = {
         { 0xB2, 0x74, 0x85, 0x51, 0xF9, 0x3C, 0x9B, 0xD2,
           0x30, 0x9E, 0x8E, 0x78, 0xFB, 0x16, 0x55, 0xA9 },
@@ -334,50 +365,54 @@ static void benchmark(Settings& settings) {
     };
 
     settings.keystart = 0x00 << 24 | 0x11 << 16 | 0x15 << 8 | 0x00;
-    /* key   00 11 22 33  44 00 00 44 decrypts to
-                000001ff11111111aa11111111111155
-                000001ff11111111aa11111111111156
-                000001ff11111111aa11111111111157  */
-    /* expected stream output in IB1 is 6F CA 96 27 30 91 03 71 */
-    settings.keystop = 0xFFFFFFFF;   /* search up to FFFFF... */
+    settings.keystop = 0xFFFFFFFF;
 
-    bruteForce(settings, probedata);
+    if (settings.numThreads > 1)
+        bruteForceParallel(settings, probedata);
+    else {
+        atomic<int> keyFound{0};
+        bruteForceRange(settings.keystart, settings.keystop,
+                        probedata, true, -1, 1, keyFound);
+    }
 }
 
 /* --------------------------------------------------------------------------
-   Core brute-force search  (ported from main.c)
+   Core brute-force search — single key range, runs on one thread
+   tid = -1 means single-threaded mode (no thread ID in output)
    -------------------------------------------------------------------------- */
-static void bruteForce(const Settings& settings, unsigned char probedata[3][16]) {
+static void bruteForceRange(uint32_t keyStart, uint32_t keyStop,
+                            const unsigned char probedata[3][16],
+                            bool isBenchmark, int tid, int /*nThreads*/,
+                            atomic<int>& keyFound) {
     int i, k;
 
-    /* ---- stream init ---- */
-    dvbcsa_bs_word_t bs_data_sb0[8 * 16];  // constant scrambled data blocks SB0+SB1
-    dvbcsa_bs_word_t bs_data_ib0[8 * 16];  // IB0 = init vector, ib1 = stream output
-
-    /* ---- block init ---- */
-    dvbcsa_bs_word_t keys_bs[64];          // bit sliced keys for block
-    dvbcsa_bs_word_t keyskk[448];          // bit sliced scheduled keys (64->448)
+    dvbcsa_bs_word_t bs_data_sb0[8 * 16];
+    dvbcsa_bs_word_t bs_data_ib0[8 * 16];
+    dvbcsa_bs_word_t keys_bs[64];
+    dvbcsa_bs_word_t keyskk[448];
 
 #ifdef USEBLOCKVIRTUALSHIFT
-    dvbcsa_bs_word_t r[8 * (1 + 8 + 56)];  // working data block
+    dvbcsa_bs_word_t r[8 * (1 + 8 + 56)];
 #else
     dvbcsa_bs_word_t r[8 * (1 + 8 + 0)];
 #endif
 
-    dvbcsa_bs_word_t candidates;           // 1 marks a key candidate in the batch
-    uint8 keylist[BS_BATCH_SIZE][8];       // keys for batch in non-bitsliced form
+    dvbcsa_bs_word_t candidates;
+    uint8 keylist[BS_BATCH_SIZE][8];
 
     BFState st;
-    st.currentkey32 = settings.keystart;
-    st.stopkey32    = settings.keystop;
-    st.benchmark    = settings.benchmark;
+    st.currentkey32 = keyStart;
+    st.stopkey32    = keyStop;
+    st.benchmark    = isBenchmark;
 
-    printf("start key is %02X %02X %02X [] %02X %02X %02X []\n",
-           (uint8)(st.currentkey32 >> 24), (uint8)(st.currentkey32 >> 16),
-           (uint8)(st.currentkey32 >> 8), (uint8)st.currentkey32, 0, 0);
-    printf("stop key is  %02X %02X %02X [] %02X %02X %02X []\n",
-           (uint8)(st.stopkey32 >> 24), (uint8)(st.stopkey32 >> 16),
-           (uint8)(st.stopkey32 >> 8), (uint8)st.stopkey32, 0xFF, 0xFF);
+    if (tid <= 0) {  // only thread 0 (or single-threaded) prints
+        printf("start key is %02X %02X %02X [] %02X %02X %02X []\n",
+               (uint8)(keyStart >> 24), (uint8)(keyStart >> 16),
+               (uint8)(keyStart >> 8), (uint8)keyStart, 0, 0);
+        printf("stop key is  %02X %02X %02X [] %02X %02X %02X []\n",
+               (uint8)(keyStop >> 24), (uint8)(keyStop >> 16),
+               (uint8)(keyStop >> 8), (uint8)keyStop, 0xFF, 0xFF);
+    }
 
     aycw_init_block();
     aycw_init_stream(probedata[0], bs_data_sb0);
@@ -390,14 +425,9 @@ static void bruteForce(const Settings& settings, unsigned char probedata[3][16])
 #endif
 
     /* ======== outer loop ======== */
-    while (st.currentkey32 <= st.stopkey32) {
+    while (st.currentkey32 <= st.stopkey32 && keyFound.load() == 0) {
         bfPerformanceStart(st);
 
-        /* Build keylist for this batch.
-           Bytes 5+6 belong to inner loop.
-           aycw_bs_increment_keys_inner() increments every slice by one
-           starting byte 5 LSB (bit 40). From byte 6 MSB down the slices
-           spread key ranges. */
 #if BS_BATCH_SIZE > 256
 #error keylist calculation cannot yet handle BS_BATCH_SIZE>256
 #endif
@@ -412,7 +442,6 @@ static void bruteForce(const Settings& settings, unsigned char probedata[3][16])
             keylist[i][7] = keylist[i][4] + keylist[i][5] + keylist[i][6];
         }
 
-        /* Transpose keys into bitsliced form */
         aycw_key_transpose(&keylist[0][0], keys_bs);
         aycw_assert_key_transpose(&keylist[0][0], keys_bs);
 
@@ -422,8 +451,6 @@ static void bruteForce(const Settings& settings, unsigned char probedata[3][16])
             aycw_assertKeyBatch(keys_bs);
 
             /* ---- stream decrypt ---- */
-            /* Only 24 bits (3 bytes) are needed for PES header check.
-               Generating fewer bits saves 4 stream-cipher rounds per inner iteration. */
             aycw_stream_decrypt(&bs_data_ib0[64], 24, keys_bs, bs_data_sb0);
             aycw_assert_stream(&bs_data_ib0[64], 24, keys_bs, bs_data_sb0);
 
@@ -441,15 +468,14 @@ static void bruteForce(const Settings& settings, unsigned char probedata[3][16])
             aycw_block_key_schedule(keys_bs, keyskk);
 
 #ifndef USEALLBITSLICE
-            aycw_bit2byteslice(keyskk, 7);   // 448 scheduled key bits
+            aycw_bit2byteslice(keyskk, 7);
 #endif
 
             aycw_block_decrypt(keyskk, r);
 
-            /* ---- xor stream output into block result ---- */
             aycw_bs_xor24(r, r, &bs_data_ib0[64]);
 
-            aycw_assert_decrypt_result(&probedata[0][0], &keylist[0][0], r);
+            aycw_assert_decrypt_result((unsigned char *)&probedata[0][0], &keylist[0][0], r);
 
             /* ---- PES header check ---- */
             i = aycw_checkPESheader(r, &candidates);
@@ -461,38 +487,36 @@ static void bruteForce(const Settings& settings, unsigned char probedata[3][16])
                     memset(cw, 255, sizeof(cw));
 
                     if (1 == BS_EXTLS32(BS_AND(BS_SHR(candidates, i), BS_VAL8(01)))) {
-                        /* Extract candidate key bits */
                         aycw_extractbsdata(keys_bs, i, 64, cw);
-
                         dvbcsa_key_set(cw, &key);
 
-                        /* Verify first packet */
                         memcpy(&data, &probedata[0], 16);
                         dvbcsa_decrypt(&key, data, 16);
                         if (data[0] != 0x00 || data[1] != 0x00 || data[2] != 0x01) {
-                            printf("\nFatal error: candidate verification failed!\n");
+                            printf("\n[T%d] Fatal error: candidate verification failed!\n", tid);
                             printf("last key was: %02X %02X %02X [%02X]  %02X %02X %02X [%02X]\n",
                                    cw[0], cw[1], cw[2], cw[3],
                                    cw[4], cw[5], cw[6], cw[7]);
                             exit(ERR_FATAL);
                         }
 
-                        /* Verify second packet */
                         memcpy(&data, &probedata[1], 16);
                         dvbcsa_decrypt(&key, data, 16);
                         if (data[0] == 0x00 && data[1] == 0x00 && data[2] == 0x01) {
 
-                            /* Verify third packet */
                             memcpy(&data, &probedata[2], 16);
                             dvbcsa_decrypt(&key, data, 16);
                             if (data[0] == 0x00 && data[1] == 0x00 && data[2] == 0x01) {
 
-                                printf("\nkey candidate successfully decrypted three packets\n");
-                                printf("KEY FOUND!!!    %02X %02X %02X [%02X]  %02X %02X %02X [%02X]\n",
-                                       cw[0], cw[1], cw[2], cw[3],
-                                       cw[4], cw[5], cw[6], cw[7]);
-
-                                if (!st.benchmark) bfWriteKeyFoundFile(cw);
+                                /* Claim the find — only first thread wins */
+                                int expected = 0;
+                                if (keyFound.compare_exchange_strong(expected, tid + 1)) {
+                                    printf("\n[T%d] key candidate successfully decrypted three packets\n", tid);
+                                    printf("KEY FOUND!!!    %02X %02X %02X [%02X]  %02X %02X %02X [%02X]\n",
+                                           cw[0], cw[1], cw[2], cw[3],
+                                           cw[4], cw[5], cw[6], cw[7]);
+                                    if (!st.benchmark) bfWriteKeyFoundFile(cw);
+                                }
                                 exit(OK);
                             }
                         }
@@ -500,19 +524,57 @@ static void bruteForce(const Settings& settings, unsigned char probedata[3][16])
                 }
             }
 
-            /* Advance to next BS_BATCH_SIZE keys */
             aycw_bs_increment_keys_inner(keys_bs);
         }
 
-        bfPerfShow(st);
+        if (tid <= 0)  // only thread 0 prints progress
+            bfPerfShow(st, tid);
 
-        if (!st.benchmark) bfWriteResumeFile(st);
+        if (!st.benchmark) bfWriteResumeFile(st, tid);
 
         st.currentkey32++;
     }
 
-    printf("\nStop key reached. No key found\n");
-    exit(WORKPACKAGEFINISHED);
+    /* Only print "stop reached" in single-threaded mode or from thread 0 */
+    if (keyFound.load() == 0 && tid <= 0) {
+        printf("\nStop key reached. No key found\n");
+    }
+}
+
+/* --------------------------------------------------------------------------
+   Parallel dispatcher: splits key range across threads
+   -------------------------------------------------------------------------- */
+static void bruteForceParallel(const Settings& settings,
+                               unsigned char probedata[3][16]) {
+    const int nThreads = settings.numThreads;
+    const uint32_t range = settings.keystop - settings.keystart;
+    const uint32_t chunk = range / nThreads;
+
+    printf("Splitting key space across %d threads (chunk size: %u per thread)\n",
+           nThreads, chunk);
+
+    atomic<int> keyFound{0};
+    vector<thread> threads;
+    threads.reserve(nThreads - 1);
+
+    for (int t = 1; t < nThreads; t++) {
+        uint32_t start = settings.keystart + t * chunk;
+        uint32_t stop  = (t == nThreads - 1) ? settings.keystop : (start + chunk - 1);
+        threads.emplace_back(bruteForceRange, start, stop,
+                             probedata, settings.benchmark,
+                             t, nThreads, ref(keyFound));
+    }
+
+    /* Thread 0 runs in the main thread */
+    uint32_t start0 = settings.keystart;
+    uint32_t stop0  = (nThreads == 1) ? settings.keystop : (start0 + chunk - 1);
+    bruteForceRange(start0, stop0, probedata, settings.benchmark,
+                    0, nThreads, keyFound);
+
+    /* Wait for all worker threads */
+    for (auto& t : threads) {
+        if (t.joinable()) t.join();
+    }
 }
 
 /* --------------------------------------------------------------------------
@@ -526,7 +588,7 @@ int main(int argc, char *argv[]) {
     } catch (const exception& x) {
         cerr << "Error: " << x.what() << '\n';
         cerr << "Usage: " << argv[0]
-             << " [-t filename] [-a start_cw] [-o stop_cw] -b -s -h\n";
+             << " [-t filename] [-a start_cw] [-o stop_cw] [-p threads] -b -s -h\n";
         return EXIT_FAILURE;
     }
 
@@ -544,8 +606,8 @@ int main(int argc, char *argv[]) {
 
     printBanner(settings);
 
-    /* Read resume file for non-benchmark runs */
-    if (!settings.benchmark) {
+    /* Read resume file for non-benchmark runs (single-threaded only) */
+    if (!settings.benchmark && settings.numThreads == 1) {
         bfReadResumeFile(&settings.keystart);
     }
 
@@ -558,6 +620,13 @@ int main(int argc, char *argv[]) {
     unsigned char probedata[3][16];
     ayc_read_ts(settings.tsFilename.c_str(), &probedata[0][0]);
 
-    bruteForce(settings, probedata);
+    if (settings.numThreads > 1)
+        bruteForceParallel(settings, probedata);
+    else {
+        atomic<int> keyFound{0};
+        bruteForceRange(settings.keystart, settings.keystop,
+                        probedata, false, 0, 1, keyFound);
+    }
+
     return 0;
 }
