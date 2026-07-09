@@ -312,7 +312,7 @@ AYCW_INLINE void aycw__vInitRound(uint8 j, uint8 u8Byte,
             return 0;*/
         BS_TMP_B[k] = BS_XOR(BS_TMP_B[k], ( (j & 0x1)?bs_data_sb0[k+4+u8Byte*8]:bs_data_sb0[k+u8Byte*8]));
 
-        BS_TMP_B_Result[k]  = BS_AND(BS_TMP_B[k], BS_NOT(stPQXYZ->BS_P)); //Die nicht zu rotierenden Daten zunächst zwischenspeichern.
+        BS_TMP_B_Result[k]  = BS_AND(BS_TMP_B[k], BS_NOT(stPQXYZ->BS_P)); //Die nicht zu rotierenden Daten zunï¿½chst zwischenspeichern.
 
     }
     /* yet rotate B */
@@ -433,7 +433,7 @@ AYCW_INLINE void aycw__vRound(aycw_tstPQXYZ     *stPQXYZ,
         BS_TMP_B[k] = BS_TMP_B[k] ^ A_tBITVALUE(&u32IV, 0, k);   
         BS_ConverToIntArray(tmpIntArray,B_BS,40);
 #endif
-        BS_TMP_B_Result[k]  = BS_AND(BS_TMP_B[k], BS_NOT(stPQXYZ->BS_P)); //Die nicht zu rotierenden Daten zunächst zwischenspeichern.
+        BS_TMP_B_Result[k]  = BS_AND(BS_TMP_B[k], BS_NOT(stPQXYZ->BS_P)); //Die nicht zu rotierenden Daten zunï¿½chst zwischenspeichern.
 
     //  BS_ConverToIntArray(tmpIntArray,B_BS,40);
         //B: 0x00000006baf6a617
@@ -614,7 +614,7 @@ set up data used for stream. Depends on scrambled data only, so can be global
 @param   iv[in]            data packets SB0 SB1
 @param   bs_data_sb0[out]  data packets SB0 SB1 bit sliced
 */
-void aycw_init_stream(const char *iv, dvbcsa_bs_word_t *bs_data_sb0)
+void aycw_init_stream(const uint8 *iv, dvbcsa_bs_word_t *bs_data_sb0)
 {
     uint8 i,j;
 

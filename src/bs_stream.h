@@ -38,7 +38,7 @@ void aycw_key_transpose(const uint8 *key_in, dvbcsa_bs_word_t *key_bs_out);
 
 void aycw_vTransformKey(dvbcsa_bs_word_t * BS_key, char * cw, uint8 keyposition);
 
-void aycw_init_stream(const char *iv, dvbcsa_bs_word_t *bs_data_sb0);
+void aycw_init_stream(const uint8 *iv, dvbcsa_bs_word_t *bs_data_sb0);
 
 /**
 set up data used for stream. Depends on scrambled data only, so can be global

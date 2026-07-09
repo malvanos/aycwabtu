@@ -54,9 +54,9 @@ int main(int argc, char *argv[])
             10 encrypted even
             11 encrypted odd
          2  AFC   Adaption Field Control
-            1. 01 – no adaptation field, payload only
-            2. 10 – adaptation field only, no payload
-            3. 11 – adaptation field followed by payload
+            1. 01 ï¿½ no adaptation field, payload only
+            2. 10 ï¿½ adaptation field only, no payload
+            3. 11 ï¿½ adaptation field followed by payload
             4. 00 - RESERVED for future use
          4  CC    Continuity Counter; counts 0 to 15 sequentially for packets of same PID value */
 
@@ -67,7 +67,7 @@ int main(int argc, char *argv[])
          buf[3] = 0x93;
          buf[6] = 1;
          buf[8] = i;    // generate three different packets
-         dvbcsa_key_set(&cw, &key);
+         dvbcsa_key_set(cw, &key);
          dvbcsa_encrypt(&key, &buf[4], 184);
          fwrite(buf, 1, 188, filehdl);
       }

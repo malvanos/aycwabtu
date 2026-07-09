@@ -1,7 +1,10 @@
 .PHONY: all clean
 
-CC          = gcc
-LD          = gcc
+UNAME_S := $(shell uname -s)
+UNAME_M := $(shell uname -m)
+
+CC          = g++
+LD          = g++
 
 SHELL=bash
 
@@ -9,23 +12,39 @@ GITHASH := $(shell git rev-parse --short HEAD)
 
 CFLAGS      = \
     -w                                  \
+    -x c++                              \
+    -std=c++17                          \
     -I src/libdvbcsa/dvbcsa             \
-    -msse2  -msse4.2                    \
     -O2                                 \
-    -DGITHASH=\"$(GITHASH)\" 
+    -DGITHASH=\"$(GITHASH)\"
+
+ifeq ($(UNAME_M),x86_64)
+    CFLAGS += -msse2 -msse4.2 -DPARALLEL_MODE=2
+else
+    CFLAGS += -DPARALLEL_MODE=1
+endif
+
+LDFLAGS     =
+ifeq ($(UNAME_S),Linux)
+    LDFLAGS += -static -s
+endif
 
 obj/%.o : src/%.c
 	@mkdir -p $(@D)
-	$(CC) -c -MD $(CFLAGS)-o obj/$*.o $<
+	$(CC) -c -MD $(CFLAGS) -o obj/$*.o $<
+
+obj/%.o : src/%.cpp
+	@mkdir -p $(@D)
+	$(CC) -c -MD $(CFLAGS) -o obj/$*.o $<
 
 ayc_src = \
-	main.c             \
+	main.cpp           \
 	bs_algo.c          \
 	bs_block.c         \
 	bs_block_ab.c      \
-	bs_sse2.c     		\
+	bs_sse2.c          \
 	bs_stream.c        \
-	bs_uint32.c	    \
+	bs_uint32.c        \
 	ts.c
 
 tsgen_src = tsgen.c
@@ -37,6 +56,7 @@ libdvbcsa_src = \
 	libdvbcsa/dvbcsa_stream.c
 
 ayc_obj         = $(ayc_src:%.c=obj/%.o)
+ayc_obj         := $(ayc_obj:%.cpp=obj/%.o)
 tsgen_obj       = $(tsgen_src:%.c=obj/%.o)
 libdvbcsa_obj   = $(libdvbcsa_src:%.c=obj/%.o)
 
@@ -44,11 +64,11 @@ all: aycwabtu
    
 
 aycwabtu: $(ayc_obj) $(libdvbcsa_obj)
-	$(LD) -static -s -o $@ $(ayc_obj) $(libdvbcsa_obj)
+	$(LD) $(LDFLAGS) -o $@ $(ayc_obj) $(libdvbcsa_obj)
 	@echo $@ created
 
 tsgen: $(tsgen_obj) $(libdvbcsa_obj)
-	$(LD) -o $@ $(tsgen_obj) $(libdvbcsa_obj)
+	$(LD) $(LDFLAGS) -o $@ $(tsgen_obj) $(libdvbcsa_obj)
 	@echo $@ created
 
 
@@ -66,4 +86,5 @@ include $(wildcard obj/*.d) $(wildcard obj/libdvbcsa/*.d)
 
 clean:
 	@rm -rf aycwabtu tsgen aycwabtu.exe tsgen.exe obj
+
 

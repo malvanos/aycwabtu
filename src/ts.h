@@ -2,4 +2,4 @@
 @tsfile     filename string
 @probedata  array [3][16]
 */
-unsigned char ayc_read_ts(unsigned char *tsfile, unsigned char *probedata);
+unsigned char ayc_read_ts(const char *tsfile, unsigned char *probedata);

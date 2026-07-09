@@ -83,7 +83,7 @@ void dvbcsa_block_decrypt (const dvbcsa_keys_t key, const dvbcsa_block_t in, dvb
 
   while (i--)
     {
-      register uint8_t	L;
+      uint8_t	L;
       uint8_t		S;
 
       S = dvbcsa_block_sbox[key[i] ^ W[6]];
@@ -113,7 +113,7 @@ void dvbcsa_block_encrypt (const dvbcsa_keys_t key, const dvbcsa_block_t in, dvb
 
   while (i < DVBCSA_KEYSBUFF_SIZE)
     {
-      register uint8_t	L;
+      uint8_t	L;
       uint8_t		S;
 
       S = dvbcsa_block_sbox[key[i] ^ W[7]];

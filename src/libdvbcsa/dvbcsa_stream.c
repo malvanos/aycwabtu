@@ -55,7 +55,7 @@
 */
 
 DVBCSA_INLINE
-static inline uint8_t swap_nbl (register uint8_t byte)
+static inline uint8_t swap_nbl (uint8_t byte)
 {
   return ((byte >> 4) | (byte << 4));
 }
@@ -66,8 +66,8 @@ static inline uint8_t swap_nbl (register uint8_t byte)
 */
 
 DVBCSA_INLINE
-static inline uint8_t csa_stream_rotate (register uint32_t pqzyx,
-					 register uint32_t x)
+static inline uint8_t csa_stream_rotate (uint32_t pqzyx,
+					 uint32_t x)
 {
   return TSTP(pqzyx) ? ((x << 1) | ((x >> 3) & 1)) & 0xf : x;
 }
@@ -79,7 +79,7 @@ static inline uint8_t csa_stream_rotate (register uint32_t pqzyx,
 */
 
 DVBCSA_INLINE
-static inline uint32_t csa_stream_sboxes(register uint64_t A)
+static inline uint32_t csa_stream_sboxes(uint64_t A)
 {
   /* modified sboxes tables */
   static const uint16_t sbox[7][32] = 
@@ -148,7 +148,7 @@ static inline uint32_t csa_stream_sboxes(register uint64_t A)
 */
 
 DVBCSA_INLINE
-static inline uint32_t csa_stream_B_sel	(register uint64_t B)
+static inline uint32_t csa_stream_B_sel	(uint64_t B)
 {
   uint32_t	t = B >> 9;
 
