@@ -422,21 +422,21 @@ static void bruteForce(const Settings& settings, unsigned char probedata[3][16])
             aycw_assertKeyBatch(keys_bs);
 
             /* ---- stream decrypt ---- */
-            aycw_stream_decrypt(&bs_data_ib0[64], 25, keys_bs, bs_data_sb0);
-            aycw_assert_stream(&bs_data_ib0[64], 25, keys_bs, bs_data_sb0);
+            /* Only 24 bits (3 bytes) are needed for PES header check.
+               Generating fewer bits saves 4 stream-cipher rounds per inner iteration. */
+            aycw_stream_decrypt(&bs_data_ib0[64], 24, keys_bs, bs_data_sb0);
+            aycw_assert_stream(&bs_data_ib0[64], 24, keys_bs, bs_data_sb0);
 
 #ifndef USEALLBITSLICE
             aycw_bit2byteslice(&bs_data_ib0[64], 1);
 #endif
 
             /* ---- block decrypt ---- */
-            for (i = 0; i < 8 * 8; i++) {
 #ifdef USEBLOCKVIRTUALSHIFT
-                r[8 * 56 + i] = bs_data_ib0[i];
+            std::memcpy(&r[8 * 56], bs_data_ib0, 8 * 8 * sizeof(dvbcsa_bs_word_t));
 #else
-                r[i] = bs_data_ib0[i];
+            std::memcpy(r, bs_data_ib0, 8 * 8 * sizeof(dvbcsa_bs_word_t));
 #endif
-            }
 
             aycw_block_key_schedule(keys_bs, keyskk);
 
