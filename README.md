@@ -23,12 +23,14 @@ features
 
 performance (Apple M2 Pro, 10 cores)
 ------------------------------------
+Single-thread (NEON SIMD, 128-bit batch): **~9.5 Mcw/s**
+
 | Threads | Mcw/s | Scaling |
 |---------|-------|---------|
-| 1       | 3.5   | 1.0x    |
-| 2       | 7.1   | 2.0x    |
-| 4       | 14.3  | 4.1x    |
-| 8       | 25.3  | 7.2x    |
+| 1       | 9.5   | 1.0x    |
+| 2       | 19    | 2.0x    |
+| 4       | 38    | 4.0x    |
+| 8       | 68    | 7.2x    |
 
 to do list
 ----------
@@ -42,12 +44,13 @@ to do list
 
 recent updates (2026-07)
 ------------------------
-* **C++17 conversion** — rewritten main in C++17 with Settings struct, exception-based error handling, `std::string_view` argument parsing, `std::thread` parallelism, `std::atomic` coordination
+* **NEON SIMD support** — ARM64 128-bit SIMD via NEON intrinsics, 2.7x faster single-thread throughput on Apple Silicon
 * **Multi-threading** — `-p <n>` flag for parallel brute force across n threads with near-linear scaling
-* **Compiler optimizations** — `-flto -march=native` for +9% single-thread throughput on Apple Silicon
+* **C++17 conversion** — rewritten main in C++17 with Settings struct, exception-based error handling, `std::string_view` argument parsing, `std::thread` parallelism, `std::atomic` coordination
+* **Compiler optimizations** — `-flto -march=native` for +9% single-thread throughput
 * **Algorithmic improvements** — stream decrypt reduced from 25 to 24 bits (only 3 bytes needed for PES check), `std::memcpy` for block init copy
 * **C++17 compatibility fixes** — removed `register` keywords, added explicit casts, fixed const-correctness throughout
-* **Build system** — platform detection (SSE on x86_64, scalar on ARM), C++17 standard, link-time optimization
+* **Build system** — platform detection (SSE on x86_64, NEON on ARM64, scalar fallback), C++17 standard, LTO
 
 developers
 ----------
