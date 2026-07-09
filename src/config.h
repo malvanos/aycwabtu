@@ -11,6 +11,7 @@ typedef uint32_t     uint32;
 
 #define PARALLEL_32_INT       1
 #define PARALLEL_128_SSE2     2
+#define PARALLEL_128_NEON     3
 
 #ifndef PARALLEL_MODE   // can be set outside
 //#define PARALLEL_MODE      PARALLEL_32_INT
@@ -23,6 +24,8 @@ typedef uint32_t     uint32;
 #include "bs_uint32.h"
 #elif PARALLEL_MODE==PARALLEL_128_SSE2
 #include "bs_sse2.h"
+#elif PARALLEL_MODE==PARALLEL_128_NEON
+#include "bs_neon.h"
 #else
 #error "unknown/undefined parallel mode"
 #endif

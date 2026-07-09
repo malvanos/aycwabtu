@@ -22,6 +22,10 @@ CFLAGS      = \
 
 ifeq ($(UNAME_M),x86_64)
     CFLAGS += -msse2 -msse4.2 -DPARALLEL_MODE=2
+else ifeq ($(UNAME_M),arm64)
+    CFLAGS += -DPARALLEL_MODE=3
+else ifeq ($(UNAME_M),aarch64)
+    CFLAGS += -DPARALLEL_MODE=3
 else
     CFLAGS += -DPARALLEL_MODE=1
 endif
@@ -44,10 +48,18 @@ ayc_src = \
 	bs_algo.c          \
 	bs_block.c         \
 	bs_block_ab.c      \
-	bs_sse2.c          \
 	bs_stream.c        \
-	bs_uint32.c        \
 	ts.c
+
+ifeq ($(UNAME_M),x86_64)
+    ayc_src += bs_sse2.c
+else ifeq ($(UNAME_M),arm64)
+    ayc_src += bs_neon.c
+else ifeq ($(UNAME_M),aarch64)
+    ayc_src += bs_neon.c
+else
+    ayc_src += bs_uint32.c
+endif
 
 tsgen_src = tsgen.c
 

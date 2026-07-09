@@ -401,7 +401,7 @@ int aycw_checkPESheader(dvbcsa_bs_word_t *data, dvbcsa_bs_word_t *candidates)
    // ret is not number of hits, but slice position MOD 32
 #if PARALLEL_MODE == PARALLEL_32_INT
    ret  = BS_EXTLS32(c);
-#elif PARALLEL_MODE == PARALLEL_128_SSE2
+#elif PARALLEL_MODE == PARALLEL_128_SSE2 || PARALLEL_MODE == PARALLEL_128_NEON
 	 ret  = BS_EXTRACT32(c,0);
 	 ret &= BS_EXTRACT32(c,1);
 	 ret &= BS_EXTRACT32(c,2);
