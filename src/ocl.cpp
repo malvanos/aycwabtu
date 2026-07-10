@@ -98,8 +98,10 @@ bool ocl_init(OclContext& ocl, const char* kernel_source) {
 
 bool ocl_search(OclContext& ocl,
                 const uint8_t probedata[48],
-                uint32_t key_start, uint32_t key_stop,
+                uint32_t key_start,
                 uint32_t key_count,
+                uint32_t inner_start,
+                uint32_t inner_count,
                 uint8_t cw_out[8]) {
     if (!ocl.ready) return false;
 
@@ -126,7 +128,8 @@ bool ocl_search(OclContext& ocl,
     clSetKernelArg(ocl.kernel, 0, sizeof(cl_mem), &buf_probe);
     clSetKernelArg(ocl.kernel, 1, sizeof(cl_mem), &buf_found);
     clSetKernelArg(ocl.kernel, 2, sizeof(uint32_t), &key_start);
-    clSetKernelArg(ocl.kernel, 3, sizeof(uint32_t), &key_stop);
+    clSetKernelArg(ocl.kernel, 3, sizeof(uint32_t), &inner_start);
+    clSetKernelArg(ocl.kernel, 4, sizeof(uint32_t), &inner_count);
 
     /* Launch kernel */
     err = clEnqueueNDRangeKernel(ocl.queue, ocl.kernel, 1, nullptr,

@@ -10,9 +10,10 @@ exact porting from the C reference implementation.
 
 | File | Status | Description |
 |------|--------|-------------|
-| `src/aycwabtu.cl` | ⚠️ needs algorithm fix | OpenCL kernel (344 lines) |
-| `src/ocl.hpp` | ✅ done | Host-side header |
-| `src/ocl.cpp` | ✅ done | Host implementation |
+| `src/aycwabtu.cl` | ✅ done (Phase 1) | OpenCL kernel — exact CSA port, 65536 inner keys/work-item |
+| `src/ocl.hpp` | ✅ done | Host-side header (inner loop params added) |
+| `src/ocl.cpp` | ✅ done | Host implementation (inner loop params added) |
+| `test_ocl.cpp` | ✅ done | Test program — verifies known key against GPU |
 | main.cpp integration | 🔲 todo | `--opencl` flag, OpenCL fallback path |
 
 ## Architecture
@@ -45,27 +46,31 @@ SIMD efficiency — acceptable for a first implementation.
 
 ## Remaining Work
 
-### Phase 1: Fix CSA algorithm (~2-3 days)
+### Phase 1: Fix CSA algorithm ✅ COMPLETE (2026-07-10)
 
-The kernel's CSA stream and block ciphers are simplified approximations.
-Need exact ports of:
+The kernel's CSA stream and block ciphers have been replaced with exact ports from libdvbcsa.
 
 **Stream cipher** (from `libdvbcsa/dvbcsa_stream.c`):
-- [ ] 7 sbox boolean equations (sbox1 through sbox7)
-- [ ] Shift register A/B initialization from control word
-- [ ] 32 init rounds with interleaved SB0/SB1 data
-- [ ] Key stream generation loop
+- [x] 7 sbox lookup tables (sbox1 through sbox7)
+- [x] Shift register A/B initialization from nibble-swapped control word (cws)
+- [x] 32 init rounds with interleaved nibble-swapped IV data
+- [x] Key stream generation loop (4 rounds per byte with stream_out table)
 
 **Block cipher** (from `libdvbcsa/dvbcsa_block.c`):
-- [ ] 64-bit key → 448-bit schedule expansion (6 permutation rounds)
-- [ ] NOT/XOR patterns per round group
-- [ ] 56-round decrypt loop
-- [ ] Bit permutation in the decrypt round
-- [ ] Sbox 256-entry lookup table (already in kernel)
+- [x] 64-bit key → 448-bit schedule expansion (6 permutation rounds via kperm[8][256])
+- [x] 56-round decrypt loop with register shuffling
+- [x] Byte-level permutation via csa_block_perm[256]
+- [x] Correct dvbcsa_block_sbox[256] lookup table
 
 **Verification**:
-- [ ] Test with known key (Testfile_CW_7FFAE9A02486.ts)
-- [ ] Cross-check decrypt output against libdvbcsa C reference
+- [x] Test with known key (Testfile_CW_7FFAE9A02486.ts)
+- [x] Cross-check decrypt output against libdvbcsa C reference
+- [x] Full inner key loop (65536 iterations per work-item)
+
+**Bugs found and fixed during implementation**:
+- Chain XOR direction was reversed (data[i-8] ^= data[i], not data[i] ^= data[i-8])
+- Inner loop used u16 causing overflow when inner_count=65536
+- Stream cipher is required for PES check (chain XOR combines stream output with block decrypt output)
 
 ### Phase 2: Performance (~1 week)
 
