@@ -19,6 +19,7 @@
 #include "bs_testcases.h"
 #include "dvbcsa.h"
 #include "ts.h"
+#include "ocl.hpp"
 
 using namespace std;
 
@@ -35,6 +36,7 @@ struct Settings {
     Settings()
         : benchmark(false)
         , selftest(false)
+        , useGPU(false)
         , keystart(0)
         , keystop(0xFFFFFFFF)
         , numThreads(1)
@@ -42,6 +44,7 @@ struct Settings {
 
     bool     benchmark;
     bool     selftest;
+    bool     useGPU;
     string   tsFilename;
     uint32_t keystart;
     uint32_t keystop;
@@ -57,6 +60,8 @@ static void bruteForceRange(uint32_t keyStart, uint32_t keyStop,
                             atomic<int>& keyFound);
 static void bruteForceParallel(const Settings& settings,
                                unsigned char probedata[3][16]);
+static void bruteForceGPU(const Settings& settings,
+                          unsigned char probedata[3][16]);
 
 /* --------------------------------------------------------------------------
    Utility: hex print
@@ -211,6 +216,7 @@ static void printUsage() {
     printf("                    bytes are omittted, e.g. 112233556677 [000000000000]\n");
     printf("   -o stop cw       when this cw is reached, program terminates [FFFFFFFFFFFF]\n");
     printf("   -p threads       number of parallel threads (default: 1)\n");
+    printf("   -g               use GPU (OpenCL) for brute force search\n");
     printf("   -b               start benchmark run with internal demo ts data and quit\n");
     printf("   -s               execute algorithm self test and quit\n");
     printf("   -h               print this help message and quit\n");
@@ -266,6 +272,11 @@ static Settings parse(int argc, char *argv[]) {
             continue;
         }
 
+        if (*it == "-g") {
+            settings.useGPU = true;
+            continue;
+        }
+
         if (*it == "-s") {
             settings.selftest = true;
             continue;
@@ -291,17 +302,22 @@ static void printBanner(const Settings& settings) {
 #ifdef _DEBUG
     cout << " DEBUG";
 #endif
-    cout << "\nCPU only";
-    if (settings.numThreads > 1)
-        cout << ", " << settings.numThreads << " threads";
-    else
-        cout << ", single threaded";
+    if (settings.useGPU)
+        cout << "\nGPU mode (OpenCL)";
+    else {
+        cout << "\nCPU only";
+        if (settings.numThreads > 1)
+            cout << ", " << settings.numThreads << " threads";
+        else
+            cout << ", single threaded";
 #ifdef USEALLBITSLICE
-    cout << " - all bit slice (bool sbox)";
+        cout << " - all bit slice (bool sbox)";
 #else
-    cout << " - table sbox";
+        cout << " - table sbox";
 #endif
-    cout << "\nparallel bitslice batch size is " << BS_BATCH_SIZE << "\n";
+        cout << "\nparallel bitslice batch size is " << BS_BATCH_SIZE;
+    }
+    cout << "\n";
     cout << "----------------------------------------\n";
     setbuf(stdout, NULL);   // disable buffering
 }
@@ -578,6 +594,136 @@ static void bruteForceParallel(const Settings& settings,
 }
 
 /* --------------------------------------------------------------------------
+   GPU (OpenCL) brute-force search
+   -------------------------------------------------------------------------- */
+
+/* Find kernel source file — try several paths relative to CWD */
+static string findKernelPath() {
+    const char *candidates[] = {
+        "src/aycwabtu.cl",
+        "../src/aycwabtu.cl",
+        "aycwabtu.cl",
+        nullptr
+    };
+    for (int i = 0; candidates[i]; i++) {
+        FILE *f = fopen(candidates[i], "r");
+        if (f) { fclose(f); return candidates[i]; }
+    }
+    return "";
+}
+
+static string loadKernelSource(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) return "";
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    string src(sz, '\0');
+    fread(&src[0], 1, sz, f);
+    fclose(f);
+    return src;
+}
+
+static void bruteForceGPU(const Settings& settings,
+                          unsigned char probedata[3][16]) {
+    /* Find and load kernel */
+    string kernelPath = findKernelPath();
+    if (kernelPath.empty()) {
+        cerr << "Error: cannot find OpenCL kernel source (aycwabtu.cl)" << endl;
+        cerr << "Searched: src/aycwabtu.cl, ../src/aycwabtu.cl, aycwabtu.cl" << endl;
+        exit(ERR_FATAL);
+    }
+    cout << "Loading kernel from: " << kernelPath << endl;
+
+    string kernelSrc = loadKernelSource(kernelPath.c_str());
+    if (kernelSrc.empty()) {
+        cerr << "Error: failed to read kernel source" << endl;
+        exit(ERR_FATAL);
+    }
+
+    /* Initialize OpenCL */
+    OclContext ocl;
+    if (!ocl_init(ocl, kernelSrc.c_str())) {
+        cerr << "Error: OpenCL initialization failed" << endl;
+        exit(ERR_FATAL);
+    }
+
+    /* Flatten probedata: [3][16] -> [48] */
+    uint8_t probe[48];
+    memcpy(probe, probedata, 48);
+
+    /* Search in chunks to avoid GPU timeout and allow progress reporting.
+       Each work-item tests 65536 inner keys, so chunkSize outer keys
+       means chunkSize work-items.  At ~13 Mcw/s, 4096 outer keys takes
+       about 20 seconds per chunk — safe from GPU timeouts. */
+    const uint32_t chunkSize = 4096;  /* outer keys per GPU launch */
+    uint32_t keyStart = settings.keystart;
+    uint32_t keyStop  = settings.keystop;
+
+    cout << "GPU search: keys " << hex << keyStart << " .. " << keyStop << dec << endl;
+    cout << "Chunk size: " << chunkSize << " outer keys per launch" << endl;
+
+    uint64_t startTime = getTicksMs();
+    uint32_t outerKeysDone = 0;
+    uint32_t totalOuterKeys = keyStop - keyStart + 1;
+
+    for (uint32_t chunkStart = keyStart; chunkStart <= keyStop; chunkStart += chunkSize) {
+        uint32_t count = min(chunkSize, keyStop - chunkStart + 1);
+
+        uint8_t cw_out[8] = {0};
+        bool found = ocl_search(ocl, probe, chunkStart, count,
+                                0, 65536, cw_out);
+
+        outerKeysDone += count;
+
+        /* Progress report */
+        uint64_t now = getTicksMs();
+        float elapsed = (now - startTime) / 1000.0f;
+        float mcwPerSec = (outerKeysDone * 65536.0f) / elapsed / 1e6f;
+        float pctDone = (outerKeysDone * 100.0f) / totalOuterKeys;
+
+        printf("\rGPU: %.1f%% done, %.1f Mcw/s, key %08X .. ",
+               pctDone, mcwPerSec, chunkStart + count);
+        fflush(stdout);
+
+        if (found) {
+            printf("\n\nKEY FOUND: %02X %02X %02X [%02X]  %02X %02X %02X [%02X]\n",
+                   cw_out[0], cw_out[1], cw_out[2], cw_out[3],
+                   cw_out[4], cw_out[5], cw_out[6], cw_out[7]);
+
+            if (!settings.benchmark) {
+                bfWriteKeyFoundFile(cw_out);
+            }
+
+            /* Verify with CPU decrypt (same as CPU path) */
+            dvbcsa_key_t key;
+            dvbcsa_key_set(cw_out, &key);
+            uint8_t data[16];
+
+            memcpy(data, &probedata[0], 16);
+            dvbcsa_decrypt(&key, data, 16);
+            if (data[0] == 0x00 && data[1] == 0x00 && data[2] == 0x01) {
+                memcpy(data, &probedata[1], 16);
+                dvbcsa_decrypt(&key, data, 16);
+                if (data[0] == 0x00 && data[1] == 0x00 && data[2] == 0x01) {
+                    memcpy(data, &probedata[2], 16);
+                    dvbcsa_decrypt(&key, data, 16);
+                    if (data[0] == 0x00 && data[1] == 0x00 && data[2] == 0x01) {
+                        printf("Key verified: successfully decrypted 3 packets\n");
+                    }
+                }
+            }
+
+            ocl_cleanup(ocl);
+            exit(OK);
+        }
+    }
+
+    printf("\nGPU search complete. No key found.\n");
+    ocl_cleanup(ocl);
+}
+
+/* --------------------------------------------------------------------------
    main
    -------------------------------------------------------------------------- */
 int main(int argc, char *argv[]) {
@@ -620,9 +766,11 @@ int main(int argc, char *argv[]) {
     unsigned char probedata[3][16];
     ayc_read_ts(settings.tsFilename.c_str(), &probedata[0][0]);
 
-    if (settings.numThreads > 1)
+    if (settings.useGPU) {
+        bruteForceGPU(settings, probedata);
+    } else if (settings.numThreads > 1) {
         bruteForceParallel(settings, probedata);
-    else {
+    } else {
         atomic<int> keyFound{0};
         bruteForceRange(settings.keystart, settings.keystop,
                         probedata, false, 0, 1, keyFound);

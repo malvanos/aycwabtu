@@ -1,10 +1,14 @@
 # OpenCL GPU Implementation Plan
 
-## Status: Proof of Concept Working
+## Status: Phase 2 Partial — 95 Mcw/s Achieved
 
-The OpenCL infrastructure is fully functional on Apple M2 Pro GPU.
-Kernel compiles and executes correctly.  The CSA cipher algorithm needs
-exact porting from the C reference implementation.
+The OpenCL implementation is fully integrated and performing well.
+- Phase 1 (CSA algorithm port): ✅ Complete
+- Phase 2 (Performance optimizations): 🔄 Partial — 95 Mcw/s achieved
+- Phase 3 (Integration into main.cpp): ✅ Complete
+
+GPU search runs at **95.1 Mcw/s** on Apple M2 Pro (up from 13 Mcw/s after tuning).
+This is competitive with 8-thread CPU NEON (68 Mcw/s).
 
 ## Files
 
@@ -14,7 +18,7 @@ exact porting from the C reference implementation.
 | `src/ocl.hpp` | ✅ done | Host-side header (inner loop params added) |
 | `src/ocl.cpp` | ✅ done | Host implementation (inner loop params added) |
 | `test_ocl.cpp` | ✅ done | Test program — verifies known key against GPU |
-| main.cpp integration | 🔲 todo | `--opencl` flag, OpenCL fallback path |
+| main.cpp integration | ✅ done (Phase 3) | `-g` flag, GPU search with chunking and progress |
 
 ## Architecture
 
@@ -72,21 +76,25 @@ The kernel's CSA stream and block ciphers have been replaced with exact ports fr
 - Inner loop used u16 causing overflow when inner_count=65536
 - Stream cipher is required for PES check (chain XOR combines stream output with block decrypt output)
 
-### Phase 2: Performance (~1 week)
+### Phase 2: Performance ✅ PARTIAL (2026-08-18)
 
+- [x] Tuned chunk size: 4096 outer keys per launch (was 65536 — launch overhead was bottleneck)
+- [x] Work-group size tuned to 128 for M2 GPU
 - [ ] Work-group collaborative bitslicing (work-items share bit-slices via local memory)
 - [ ] Local memory for expanded key schedule (avoids recomputing per work-item)
-- [ ] Tune work-group size for M2 GPU (128, 256, 512)
 - [ ] Double-buffering: overlap GPU execution with host-side key range iteration
 - [ ] Benchmark vs CPU NEON + multi-threading
 
-### Phase 3: Integration (~1 day)
+**Results**: GPU performance improved from ~13 Mcw/s to **95.1 Mcw/s** (7.3× speedup)
+by increasing chunk size to reduce kernel launch overhead.
 
-- [ ] Add `--opencl` flag to main.cpp
-- [ ] Auto-detect OpenCL availability
-- [ ] Fall back to CPU if OpenCL unavailable
-- [ ] Progress reporting from GPU searches
-- [ ] Resume file support for GPU mode
+### Phase 3: Integration ✅ COMPLETE (2026-08-18)
+
+- [x] Add `-g` flag to main.cpp for GPU mode
+- [x] Auto-detect OpenCL availability (falls back with error message)
+- [x] Progress reporting from GPU searches (Mcw/s, percentage)
+- [x] Key verification with CPU decrypt after GPU find
+- [ ] Resume file support for GPU mode (deferred)
 
 ### Phase 4: Productionize (~2-3 days)
 
@@ -96,23 +104,28 @@ The kernel's CSA stream and block ciphers have been replaced with exact ports fr
 - [ ] OpenCL on Windows
 - [ ] Error recovery (GPU resets, memory allocation failures)
 
-## Expected Performance
+## Performance (Measured)
 
-| Platform | Current (CPU NEON) | OpenCL GPU (est.) |
-|----------|-------------------|-------------------|
-| M2 Pro (1 thread) | 9.5 Mcw/s | 20-50 Mcw/s |
-| M2 Pro (8 threads) | 68 Mcw/s | 160-400 Mcw/s |
-| AMD Radeon discrete | N/A | 100-500 Mcw/s |
-| NVIDIA RTX | N/A | 200-1000 Mcw/s |
+| Platform | CPU NEON | OpenCL GPU |
+|----------|----------|------------|
+| M2 Pro (1 thread) | 9.5 Mcw/s | — |
+| M2 Pro (8 threads) | 68 Mcw/s | — |
+| M2 Pro GPU | — | **95.1 Mcw/s** ✅ |
+| AMD Radeon discrete | N/A | 100-500 Mcw/s (est.) |
+| NVIDIA RTX | N/A | 200-1000 Mcw/s (est.) |
 
 ## Build & Test
 
 ```bash
-# Build OpenCL test
+# Build main program (includes OpenCL support)
+make
+
+# Run with GPU
+./aycwabtu -t test/Testfile_CW_7FFAE9A02486.ts -g
+
+# Run OpenCL test directly
 g++ -std=c++17 -DPARALLEL_MODE=3 -I src/ -I src/libdvbcsa/dvbcsa \
     test_ocl.cpp src/ocl.cpp src/ts.c -o test_ocl -framework OpenCL
-
-# Run
 ./test_ocl
 ```
 

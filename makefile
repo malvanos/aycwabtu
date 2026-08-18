@@ -45,6 +45,7 @@ obj/%.o : src/%.cpp
 
 ayc_src = \
 	main.cpp           \
+	ocl.cpp            \
 	bs_algo.c          \
 	bs_block.c         \
 	bs_block_ab.c      \
@@ -59,6 +60,13 @@ else ifeq ($(UNAME_M),aarch64)
     ayc_src += bs_neon.c
 else
     ayc_src += bs_uint32.c
+endif
+
+# OpenCL linking
+ifeq ($(UNAME_S),Darwin)
+    LDFLAGS += -framework OpenCL
+else
+    LDFLAGS += -lOpenCL
 endif
 
 tsgen_src = tsgen.c

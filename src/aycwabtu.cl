@@ -6,8 +6,11 @@
 /* ---- type aliases ---- */
 typedef unsigned char  u8;
 typedef unsigned int   u32;
-typedef unsigned long  u64;
 typedef unsigned short u16;
+
+/* u64 must be exactly 64 bits on all platforms.
+   OpenCL 1.2 guarantees ulong is 64 bits (unlike C99 where long varies). */
+typedef ulong u64;
 
 /* ================================================================
    Block cipher tables (from libdvbcsa/dvbcsa_block.c & dvbcsa_key.c)

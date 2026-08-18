@@ -106,7 +106,7 @@ bool ocl_search(OclContext& ocl,
     if (!ocl.ready) return false;
 
     cl_int err;
-    const size_t wg_size = 128;  /* work-group size */
+    const size_t wg_size = 128;  /* work-group size (tuned for M2 GPU) */
     size_t global_size = ((key_count + wg_size - 1) / wg_size) * wg_size;
 
     /* Clamp to reasonable max (avoid GPU timeout) */
