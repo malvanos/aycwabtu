@@ -16,6 +16,7 @@ struct OclContext {
     cl_program       program;
     cl_kernel        kernel;
     bool             ready;
+    size_t           wg_size = 128;  /* work-group size (tuned for M2 GPU) */
 };
 
 /* Initialise OpenCL: pick first GPU, compile kernel from embedded source.
@@ -29,7 +30,11 @@ bool ocl_init(OclContext& ocl, const char* kernel_source);
    - inner_start: start of inner 16-bit key loop (usually 0)
    - inner_count: number of inner keys per work-item (usually 65536)
    - cw_out: output control word (8 bytes), valid if return == true
-   Returns true if a key was found. */
+   Returns true if a key was found.
+   Internally key_count is searched as sequential dispatches of at most
+   MAX_GROUPS (64) threadgroups; this kernel corrupts work-item state when a
+   single dispatch exceeds ~72 threadgroups on the Apple M2 Pro.  Callers may
+   pass an arbitrarily large key_count. */
 bool ocl_search(OclContext& ocl,
                 const uint8_t probedata[48],
                 uint32_t key_start,

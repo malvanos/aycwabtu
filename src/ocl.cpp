@@ -96,6 +96,29 @@ bool ocl_init(OclContext& ocl, const char* kernel_source) {
     return true;
 }
 
+/* Max threadgroups per single dispatch.
+   On the Apple M2 Pro (cl2Metal) this kernel silently corrupts work-item
+   state when a dispatch exceeds ~72 threadgroups (wg=128: ~9200 items).
+   Empirically 64 groups x 128 items is always clean (see diff_host sweep).
+   Larger ranges are searched as sequential sub-dispatch of <= this many
+   work-items. */
+static const size_t MAX_GROUPS   = 64;
+static const size_t wg_size      = 128;   /* work-group size (tuned for M2 GPU) */
+static const size_t ITEMS_CHUNK  = MAX_GROUPS * wg_size;
+
+/* Convert the kernel-found u32 pair into the 8-byte CW (same layout as
+   aycwabtu.cl writes). */
+static void unpack_cw(uint32_t hi, uint32_t lo, uint8_t cw[8]) {
+    cw[0] = (hi >> 24) & 0xFF;
+    cw[1] = (hi >> 16) & 0xFF;
+    cw[2] = (hi >>  8) & 0xFF;
+    cw[3] = (hi)       & 0xFF;
+    cw[4] = (lo >> 24) & 0xFF;
+    cw[5] = (lo >> 16) & 0xFF;
+    cw[6] = (lo >>  8) & 0xFF;
+    cw[7] = (lo)       & 0xFF;
+}
+
 bool ocl_search(OclContext& ocl,
                 const uint8_t probedata[48],
                 uint32_t key_start,
@@ -106,13 +129,8 @@ bool ocl_search(OclContext& ocl,
     if (!ocl.ready) return false;
 
     cl_int err;
-    const size_t wg_size = 128;  /* work-group size (tuned for M2 GPU) */
-    size_t global_size = ((key_count + wg_size - 1) / wg_size) * wg_size;
 
-    /* Clamp to reasonable max (avoid GPU timeout) */
-    if (global_size > 1024 * 1024) global_size = 1024 * 1024;
-
-    /* Buffers */
+    /* Buffers (created once; reused across sub-dispatches) */
     cl_mem buf_probe = clCreateBuffer(ocl.context,
         CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
         48, (void*)probedata, &err);
@@ -124,43 +142,56 @@ bool ocl_search(OclContext& ocl,
         sizeof(found_init), found_init, &err);
     if (err != CL_SUCCESS) { clReleaseMemObject(buf_probe); return false; }
 
-    /* Set kernel args */
     clSetKernelArg(ocl.kernel, 0, sizeof(cl_mem), &buf_probe);
     clSetKernelArg(ocl.kernel, 1, sizeof(cl_mem), &buf_found);
-    clSetKernelArg(ocl.kernel, 2, sizeof(uint32_t), &key_start);
     clSetKernelArg(ocl.kernel, 3, sizeof(uint32_t), &inner_start);
     clSetKernelArg(ocl.kernel, 4, sizeof(uint32_t), &inner_count);
 
-    /* Launch kernel */
-    err = clEnqueueNDRangeKernel(ocl.queue, ocl.kernel, 1, nullptr,
-                                 &global_size, &wg_size, 0, nullptr, nullptr);
-    if (err != CL_SUCCESS) {
-        clReleaseMemObject(buf_probe);
-        clReleaseMemObject(buf_found);
-        return false;
+    uint32_t offset = 0;
+    while (offset < key_count) {
+        uint32_t chunk = key_count - offset;
+        if (chunk > ITEMS_CHUNK) chunk = ITEMS_CHUNK;
+
+        /* Re-zero the found flag so every sub-dispatch runs all items */
+        err = clEnqueueWriteBuffer(ocl.queue, buf_found, CL_TRUE, 0,
+                                   sizeof(found_init), found_init,
+                                   0, nullptr, nullptr);
+        if (err != CL_SUCCESS) { clReleaseMemObject(buf_probe); clReleaseMemObject(buf_found); return false; }
+
+        uint32_t chunk_start = key_start + offset;
+        size_t global_size = ((chunk + wg_size - 1) / wg_size) * wg_size;
+
+        clSetKernelArg(ocl.kernel, 2, sizeof(uint32_t), &chunk_start);
+
+        err = clEnqueueNDRangeKernel(ocl.queue, ocl.kernel, 1, nullptr,
+                                     &global_size, &wg_size, 0, nullptr, nullptr);
+        if (err != CL_SUCCESS) {
+            clReleaseMemObject(buf_probe);
+            clReleaseMemObject(buf_found);
+            return false;
+        }
+
+        uint32_t found_out[3];
+        err = clEnqueueReadBuffer(ocl.queue, buf_found, CL_TRUE, 0,
+                                  sizeof(found_out), found_out,
+                                  0, nullptr, nullptr);
+        if (err != CL_SUCCESS) {
+            clReleaseMemObject(buf_probe);
+            clReleaseMemObject(buf_found);
+            return false;
+        }
+
+        if (found_out[0] != 0) {
+            unpack_cw(found_out[1], found_out[2], cw_out);
+            clReleaseMemObject(buf_probe);
+            clReleaseMemObject(buf_found);
+            return true;
+        }
+        offset += chunk;
     }
 
-    /* Read result */
-    uint32_t found_out[3];
-    err = clEnqueueReadBuffer(ocl.queue, buf_found, CL_TRUE, 0,
-                              sizeof(found_out), found_out,
-                              0, nullptr, nullptr);
     clReleaseMemObject(buf_probe);
     clReleaseMemObject(buf_found);
-
-    if (err != CL_SUCCESS) return false;
-
-    if (found_out[0] != 0) {
-        cw_out[0] = (found_out[1] >> 24) & 0xFF;
-        cw_out[1] = (found_out[1] >> 16) & 0xFF;
-        cw_out[2] = (found_out[1] >>  8) & 0xFF;
-        cw_out[3] = (found_out[1]) & 0xFF;
-        cw_out[4] = (found_out[2] >> 24) & 0xFF;
-        cw_out[5] = (found_out[2] >> 16) & 0xFF;
-        cw_out[6] = (found_out[2] >>  8) & 0xFF;
-        cw_out[7] = (found_out[2]) & 0xFF;
-        return true;
-    }
     return false;
 }
 

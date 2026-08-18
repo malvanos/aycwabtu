@@ -597,6 +597,24 @@ static void bruteForceParallel(const Settings& settings,
    GPU (OpenCL) brute-force search
    -------------------------------------------------------------------------- */
 
+/* CPU-side verification of a GPU-reported control word: decrypts all three
+   probed packets and requires the 0x000001 PES start code in each.
+   The GPU has been observed (Apple M2 Pro / cl2Metal) to fabricate winners
+   when a dispatch exceeds ~72 threadgroups, so every GPU hit must pass this
+   before being accepted. */
+static bool verifyCw(const unsigned char probedata[3][16], const uint8_t cw[8]) {
+    dvbcsa_key_t key;
+    dvbcsa_key_set(cw, &key);
+    uint8_t data[16];
+    for (int p = 0; p < 3; p++) {
+        memcpy(data, probedata[p], 16);
+        dvbcsa_decrypt(&key, data, 16);
+        if (data[0] != 0x00 || data[1] != 0x00 || data[2] != 0x01)
+            return false;
+    }
+    return true;
+}
+
 /* Find kernel source file — try several paths relative to CWD */
 static string findKernelPath() {
     const char *candidates[] = {
@@ -687,35 +705,45 @@ static void bruteForceGPU(const Settings& settings,
         fflush(stdout);
 
         if (found) {
-            printf("\n\nKEY FOUND: %02X %02X %02X [%02X]  %02X %02X %02X [%02X]\n",
+            printf("\n\nGPU reports KEY FOUND: %02X %02X %02X [%02X]  %02X %02X %02X [%02X]\n",
                    cw_out[0], cw_out[1], cw_out[2], cw_out[3],
                    cw_out[4], cw_out[5], cw_out[6], cw_out[7]);
 
-            if (!settings.benchmark) {
-                bfWriteKeyFoundFile(cw_out);
-            }
-
-            /* Verify with CPU decrypt (same as CPU path) */
-            dvbcsa_key_t key;
-            dvbcsa_key_set(cw_out, &key);
-            uint8_t data[16];
-
-            memcpy(data, &probedata[0], 16);
-            dvbcsa_decrypt(&key, data, 16);
-            if (data[0] == 0x00 && data[1] == 0x00 && data[2] == 0x01) {
-                memcpy(data, &probedata[1], 16);
-                dvbcsa_decrypt(&key, data, 16);
-                if (data[0] == 0x00 && data[1] == 0x00 && data[2] == 0x01) {
-                    memcpy(data, &probedata[2], 16);
-                    dvbcsa_decrypt(&key, data, 16);
-                    if (data[0] == 0x00 && data[1] == 0x00 && data[2] == 0x01) {
-                        printf("Key verified: successfully decrypted 3 packets\n");
-                    }
+            if (verifyCw(probedata, cw_out)) {
+                printf("CPU verify: all 3 packets decrypted to 0x000001 - accepting key\n");
+                if (!settings.benchmark) {
+                    bfWriteKeyFoundFile(cw_out);
                 }
+                ocl_cleanup(ocl);
+                exit(OK);
             }
 
-            ocl_cleanup(ocl);
-            exit(OK);
+            /* GPU fabricated a false positive (corrupt dispatch).  Re-run this
+               chunk: the real key sits in the same range and an uncorrupted
+               relaunch has a good chance of finding it. */
+            printf("CPU verify FAILED (false positive). Re-running chunk %08X (+%u)...\n",
+                   chunkStart, count);
+            uint8_t cw2[8] = {0};
+            bool reOK = false;
+            for (int attempt = 0; attempt < 3 && !reOK; attempt++) {
+                reOK = ocl_search(ocl, probe, chunkStart, count, 0, 65536, cw2);
+                if (reOK && verifyCw(probedata, cw2)) {
+                    printf("Re-run verify OK: %02X %02X %02X [%02X]  %02X %02X %02X [%02X]\n",
+                           cw2[0], cw2[1], cw2[2], cw2[3],
+                           cw2[4], cw2[5], cw2[6], cw2[7]);
+                    if (!settings.benchmark) {
+                        bfWriteKeyFoundFile(cw2);
+                    }
+                    ocl_cleanup(ocl);
+                    exit(OK);
+                }
+                if (reOK)
+                    printf("  attempt %d: false positive, retrying\n", attempt + 1);
+            }
+            if (reOK)
+                printf("  all re-runs gave false positives; giving up on this chunk\n");
+            else
+                printf("  no find on re-run; continuing with next chunk\n");
         }
     }
 
