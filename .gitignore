@@ -29,6 +29,7 @@ tsgen.exe
 test_ocl
 test_ocl_big
 test_ocl_dbg
+bench_diag
 bench_ocl
 ocl_info
 *.new
