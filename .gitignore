@@ -12,8 +12,24 @@
 **/obj/*
 *.a
 resume
+resume-*
 keyfound
 testfile.ts
 *.log
 aycwabtu_version.h
 *.pyc
+
+# compiled binaries / intermediates
+aycwabtu
+aycwabtu.exe
+a.out
+a.out.dSYM/
+tsgen
+tsgen.exe
+test_ocl
+test_ocl_big
+test_ocl_dbg
+bench_ocl
+ocl_info
+*.new
+*.bak
