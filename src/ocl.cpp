@@ -213,7 +213,11 @@ bool ocl_search(OclContext& ocl,
 
         bool sub_dispatch_done = false;
         int attempts = 0;
-        const int max_attempts = ocl.corruptCapable ? 10 : 1;
+        /* One extra no-find/false-positive retry on corrupt-capable (Apple)
+           geometry.  The 64-group cap is provably clean, so a miss/fabrication
+           is rare; a single re-run is enough insurance.  More retries cost ~10x
+           throughput on the common no-solution path, so we keep it to 2. */
+        const int max_attempts = ocl.corruptCapable ? 2 : 1;
 
         while (!sub_dispatch_done && attempts < max_attempts) {
             attempts++;
