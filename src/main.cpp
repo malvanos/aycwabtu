@@ -628,6 +628,14 @@ static string loadKernelSource(const char *path) {
 
 static void bruteForceGPU(const Settings& settings,
                           unsigned char probedata[3][16]) {
+#ifndef HAVE_OPENCL
+    (void)settings; (void)probedata;
+    cerr << "Error: GPU (OpenCL) support was not compiled into this build.\n"
+         << "       Rebuild on a machine with an OpenCL toolchain (Linux:\n"
+         << "       install ocl-icd-opencl-dev + headers), or run in CPU mode\n"
+         << "       (omit -g or use -p <threads>)." << endl;
+    exit(ERR_FATAL);
+#else
     /* Find and load kernel */
     string kernelPath = findKernelPath();
     if (kernelPath.empty()) {
@@ -713,6 +721,7 @@ static void bruteForceGPU(const Settings& settings,
 
     printf("\nGPU search complete. No key found.\n");
     ocl_cleanup(ocl);
+#endif /* HAVE_OPENCL */
 }
 
 /* --------------------------------------------------------------------------

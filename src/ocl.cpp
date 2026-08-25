@@ -1,4 +1,7 @@
 #include "ocl.hpp"
+
+#ifdef HAVE_OPENCL
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -252,3 +255,10 @@ void ocl_cleanup(OclContext& ocl) {
     if (ocl.context) clReleaseContext(ocl.context);
     ocl.ready = false;
 }
+
+#else /* !HAVE_OPENCL */
+
+/* OpenCL is compiled out.  The stub type/inline functions live in ocl.hpp;
+   this translation unit contributes nothing when not building with OpenCL. */
+
+#endif /* HAVE_OPENCL */

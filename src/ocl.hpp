@@ -5,10 +5,15 @@
 #include <cstring>
 #include "dvbcsa.h"
 
+/* HAVE_OPENCL is defined by the build system (see makefile) when an OpenCL
+   toolchain is available.  Without it this header and ocl.cpp degrade to
+   no-op stubs so the program still builds and runs in CPU-only mode. */
+#ifdef HAVE_OPENCL
 #ifdef __APPLE__
 #include <OpenCL/cl.h>
 #else
 #include <CL/cl.h>
+#endif
 #endif
 
 /* CPU-side verification of a GPU-reported control word (CW): decrypt all three
@@ -30,6 +35,7 @@ static inline bool verifyCw(const uint8_t probedata[48], const uint8_t cw[8]) {
     return true;
 }
 
+#ifdef HAVE_OPENCL
 struct OclContext {
     cl_device_id     device;
     cl_context       context;
@@ -68,5 +74,22 @@ bool ocl_search(OclContext& ocl,
                 uint8_t cw_out[8]);
 
 void ocl_cleanup(OclContext& ocl);
+#else
+/* OpenCL not available: minimal stub type/functions.  Calls become no-ops /
+   "not ready"; callers (e.g. main's bruteForceGPU) are expected to report an
+   error up front when -g is requested but OpenCL is compiled out. */
+struct OclContext {
+    bool ready = false;
+};
+
+inline bool ocl_init(OclContext&, const char*) {
+    return false;
+}
+inline bool ocl_search(OclContext&, const uint8_t[48], uint32_t, uint32_t,
+                       uint32_t, uint32_t, uint8_t[8]) {
+    return false;
+}
+inline void ocl_cleanup(OclContext&) {}
+#endif
 
 #endif
