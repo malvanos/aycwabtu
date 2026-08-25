@@ -38,8 +38,7 @@ struct OclContext {
     cl_kernel        kernel;
     bool             ready;
     size_t           wg_size = 128;   /* work-group size (tuned for M2 GPU) */
-    uint32_t         itemsCap = 0; /* per-platform max thread-groups/dispatch */
-    bool             corruptCapable = false;
+    uint32_t         itemsCap = 0; /* per-platform max thread-groups/sub-dispatch */
 };
 
 /* Initialise OpenCL: pick first GPU, compile kernel from embedded source.
@@ -58,9 +57,8 @@ bool ocl_init(OclContext& ocl, const char* kernel_source);
    itemsCap threadgroups.  On Apple cl2Metal the cap is 64 threadgroups because
    this kernel corrupts work-item state when a single dispatch exceeds ~72
    threadgroups (provably clean at 64; verified by tools/bench_diag.cpp — see
-   BUG.md).  The corruption is nondeterministic, so on Apple expects hardened
-   retries to be enabled (ocl.corruptCapable).  Callers may pass an arbitrarily
-   large key_count. */
+   BUG.md).  Each sub-dispatch runs exactly once; code must CPU-verify a found
+   winner before accepting it.  Callers may pass an arbitrarily large key_count. */
 bool ocl_search(OclContext& ocl,
                 const uint8_t probedata[48],
                 uint32_t key_start,

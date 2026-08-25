@@ -88,20 +88,10 @@ bool ocl_init(OclContext& ocl, const char* kernel_source) {
         std::cout << "OpenCL: relaxed dispatch cap (default " << ngroups_cap << " threadgroups)" << std::endl;
     }
 
-    /* items-per-dispatch cap (wg_size=128). Apple stays at 64*128=8192 by default. */
+    /* items-per-dispatch cap (wg_size=128). Apple stays at 64*128=8192 by default.
+       No retry logic: each sub-dispatch runs once, and ocl_search CPU-verifies a
+       reported winner before accepting it (rejects fabricated ones). */
     ocl.itemsCap = (uint32_t)(ngroups_cap * 128);
-
-    /* Enable the hardened false-negative / false-positive logic whenever we are
-       on Apple.  Even at the 64-group cap the corruption can (rarely) strike,
-       because it is nondeterministic; re-running a "no-find" sub-dispatch and
-       CPU-verifying every reported winner closes both the miss hole (§3.2) and
-       the fabrication path (§3.1) from BUG.md.  Non-Apple platforms do not need
-       it, so they keep max_attempts = 1 (no retry overhead). */
-    ocl.corruptCapable = is_apple;
-    if (ocl.corruptCapable) {
-        std::cout << "OpenCL: hardened false-negative retries enabled (Apple, "
-                  << "cap=" << ngroups_cap << " threadgroups)" << std::endl;
-    }
 
     /* Create context */
     ocl.context = clCreateContext(nullptr, 1, &ocl.device,
@@ -206,71 +196,46 @@ bool ocl_search(OclContext& ocl,
     clSetKernelArg(ocl.kernel, 3, sizeof(uint32_t), &inner_start);
     clSetKernelArg(ocl.kernel, 4, sizeof(uint32_t), &inner_count);
 
+    /* Each sub-dispatch runs EXACTLY ONCE (no retry).  The 64-group cap keeps
+       the geometry clean, and CPU verification below rejects any fabricated
+       winner; no-find sub-dispatches are simply skipped. */
     uint32_t offset = 0;
     while (offset < key_count) {
         uint32_t chunk = key_count - offset;
         if (chunk > ocl.itemsCap) chunk = ocl.itemsCap;
 
-        bool sub_dispatch_done = false;
-        int attempts = 0;
-        /* One extra no-find/false-positive retry on corrupt-capable (Apple)
-           geometry.  The 64-group cap is provably clean, so a miss/fabrication
-           is rare; a single re-run is enough insurance.  More retries cost ~10x
-           throughput on the common no-solution path, so we keep it to 2. */
-        const int max_attempts = ocl.corruptCapable ? 2 : 1;
+        /* Re-zero the found flag so every sub-dispatch runs all items */
+        err = clEnqueueWriteBuffer(ocl.queue, buf_found, CL_TRUE, 0,
+                                   sizeof(found_init), found_init,
+                                   0, nullptr, nullptr);
+        if (err != CL_SUCCESS) { clReleaseMemObject(buf_probe); clReleaseMemObject(buf_found); return false; }
 
-        while (!sub_dispatch_done && attempts < max_attempts) {
-            attempts++;
-            /* Re-zero the found flag so every sub-dispatch/retry runs all items */
-            err = clEnqueueWriteBuffer(ocl.queue, buf_found, CL_TRUE, 0,
-                                       sizeof(found_init), found_init,
-                                       0, nullptr, nullptr);
-            if (err != CL_SUCCESS) { clReleaseMemObject(buf_probe); clReleaseMemObject(buf_found); return false; }
+        uint32_t chunk_start = key_start + offset;
+        size_t global_size = ((chunk + wg_size - 1) / wg_size) * wg_size;
 
-            uint32_t chunk_start = key_start + offset;
-            size_t global_size = ((chunk + wg_size - 1) / wg_size) * wg_size;
+        clSetKernelArg(ocl.kernel, 2, sizeof(uint32_t), &chunk_start);
 
-            clSetKernelArg(ocl.kernel, 2, sizeof(uint32_t), &chunk_start);
+        err = clEnqueueNDRangeKernel(ocl.queue, ocl.kernel, 1, nullptr,
+                                     &global_size, &wg_size, 0, nullptr, nullptr);
+        if (err != CL_SUCCESS) { clReleaseMemObject(buf_probe); clReleaseMemObject(buf_found); return false; }
 
-            err = clEnqueueNDRangeKernel(ocl.queue, ocl.kernel, 1, nullptr,
-                                         &global_size, &wg_size, 0, nullptr, nullptr);
-            if (err != CL_SUCCESS) { clReleaseMemObject(buf_probe); clReleaseMemObject(buf_found); return false; }
+        uint32_t found_out[3];
+        err = clEnqueueReadBuffer(ocl.queue, buf_found, CL_TRUE, 0,
+                                  sizeof(found_out), found_out,
+                                  0, nullptr, nullptr);
+        if (err != CL_SUCCESS) { clReleaseMemObject(buf_probe); clReleaseMemObject(buf_found); return false; }
 
-            uint32_t found_out[3];
-            err = clEnqueueReadBuffer(ocl.queue, buf_found, CL_TRUE, 0,
-                                      sizeof(found_out), found_out,
-                                      0, nullptr, nullptr);
-            if (err != CL_SUCCESS) { clReleaseMemObject(buf_probe); clReleaseMemObject(buf_found); return false; }
-
-            if (found_out[0] != 0) {
-                uint8_t temp_cw[8];
-                unpack_cw(found_out[1], found_out[2], temp_cw);
-                if (verifyCw(probedata, temp_cw)) {
-                    // Verified real key found!
-                    memcpy(cw_out, temp_cw, 8);
-                    clReleaseMemObject(buf_probe);
-                    clReleaseMemObject(buf_found);
-                    return true;
-                } else {
-                    // False positive candidate (garbage reported by corrupt threadgroup)
-                    if (ocl.corruptCapable) {
-                        std::cout << "\n[ocl_search] False positive detected on corrupt-capable geometry (attempt "
-                                  << attempts << "/" << max_attempts << "). Retrying sub-dispatch..." << std::endl;
-                    } else {
-                        // Even on clean geometry, we verify to be safe, but we don't retry.
-                        sub_dispatch_done = true;
-                    }
-                }
-            } else {
-                // No candidate reported by GPU.
-                if (ocl.corruptCapable && attempts < max_attempts) {
-                    // On corrupt-capable geometry, retry in case it was a false negative (missed key)
-                    std::cout << "\n[ocl_search] No find on corrupt-capable geometry (attempt "
-                              << attempts << "/" << max_attempts << "). Retrying sub-dispatch to protect against false negatives..." << std::endl;
-                } else {
-                    sub_dispatch_done = true;
-                }
+        if (found_out[0] != 0) {
+            uint8_t temp_cw[8];
+            unpack_cw(found_out[1], found_out[2], temp_cw);
+            /* CPU-verify: reject any fabricated winner (corrupt threadgroup). */
+            if (verifyCw(probedata, temp_cw)) {
+                memcpy(cw_out, temp_cw, 8);
+                clReleaseMemObject(buf_probe);
+                clReleaseMemObject(buf_found);
+                return true;
             }
+            /* False positive: not accepted, no retry — move on. */
         }
         offset += chunk;
     }
