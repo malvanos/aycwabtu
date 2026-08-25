@@ -697,6 +697,8 @@ static void bruteForceGPU(const Settings& settings,
                    cw_out[0], cw_out[1], cw_out[2], cw_out[3],
                    cw_out[4], cw_out[5], cw_out[6], cw_out[7]);
 
+            /* ocl_search already CPU-validated this winner (returns true only
+               for a real PES-valid key), so accept it directly.  No retry. */
             if (verifyCw(probe, cw_out)) {
                 printf("CPU verify: all 3 packets decrypted to 0x000001 - accepting key\n");
                 if (!settings.benchmark) {
@@ -705,33 +707,7 @@ static void bruteForceGPU(const Settings& settings,
                 ocl_cleanup(ocl);
                 exit(OK);
             }
-
-            /* GPU fabricated a false positive (corrupt dispatch).  Re-run this
-               chunk: the real key sits in the same range and an uncorrupted
-               relaunch has a good chance of finding it. */
-            printf("CPU verify FAILED (false positive). Re-running chunk %08X (+%u)...\n",
-                   chunkStart, count);
-            uint8_t cw2[8] = {0};
-            bool reOK = false;
-            for (int attempt = 0; attempt < 3 && !reOK; attempt++) {
-                reOK = ocl_search(ocl, probe, chunkStart, count, 0, 65536, cw2);
-                if (reOK && verifyCw(probe, cw2)) {
-                    printf("Re-run verify OK: %02X %02X %02X [%02X]  %02X %02X %02X [%02X]\n",
-                           cw2[0], cw2[1], cw2[2], cw2[3],
-                           cw2[4], cw2[5], cw2[6], cw2[7]);
-                    if (!settings.benchmark) {
-                        bfWriteKeyFoundFile(cw2);
-                    }
-                    ocl_cleanup(ocl);
-                    exit(OK);
-                }
-                if (reOK)
-                    printf("  attempt %d: false positive, retrying\n", attempt + 1);
-            }
-            if (reOK)
-                printf("  all re-runs gave false positives; giving up on this chunk\n");
-            else
-                printf("  no find on re-run; continuing with next chunk\n");
+            printf("CPU verify failed on GPU-reported key - not accepted (no retry)\n");
         }
     }
 
