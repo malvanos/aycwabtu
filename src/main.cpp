@@ -597,23 +597,7 @@ static void bruteForceParallel(const Settings& settings,
    GPU (OpenCL) brute-force search
    -------------------------------------------------------------------------- */
 
-/* CPU-side verification of a GPU-reported control word: decrypts all three
-   probed packets and requires the 0x000001 PES start code in each.
-   The GPU has been observed (Apple M2 Pro / cl2Metal) to fabricate winners
-   when a dispatch exceeds ~72 threadgroups, so every GPU hit must pass this
-   before being accepted. */
-static bool verifyCw(const unsigned char probedata[3][16], const uint8_t cw[8]) {
-    dvbcsa_key_t key;
-    dvbcsa_key_set(cw, &key);
-    uint8_t data[16];
-    for (int p = 0; p < 3; p++) {
-        memcpy(data, probedata[p], 16);
-        dvbcsa_decrypt(&key, data, 16);
-        if (data[0] != 0x00 || data[1] != 0x00 || data[2] != 0x01)
-            return false;
-    }
-    return true;
-}
+/* verifyCw() now lives in ocl.hpp (single shared implementation). */
 
 /* Find kernel source file — try several paths relative to CWD */
 static string findKernelPath() {
@@ -674,7 +658,11 @@ static void bruteForceGPU(const Settings& settings,
        Each work-item tests 65536 inner keys, so chunkSize outer keys
        means chunkSize work-items.  At ~13 Mcw/s, 4096 outer keys takes
        about 20 seconds per chunk — safe from GPU timeouts. */
-    const uint32_t chunkSize = 4096;  /* outer keys per GPU launch */
+    uint32_t chunkSize = 4096;  /* outer keys per GPU launch */
+    char* env_chunk = std::getenv("AYCWABTU_GPU_CHUNK_SIZE");
+    if (env_chunk && env_chunk[0]) {
+        chunkSize = (uint32_t)std::atoi(env_chunk);
+    }
     uint32_t keyStart = settings.keystart;
     uint32_t keyStop  = settings.keystop;
 
@@ -709,7 +697,7 @@ static void bruteForceGPU(const Settings& settings,
                    cw_out[0], cw_out[1], cw_out[2], cw_out[3],
                    cw_out[4], cw_out[5], cw_out[6], cw_out[7]);
 
-            if (verifyCw(probedata, cw_out)) {
+            if (verifyCw(probe, cw_out)) {
                 printf("CPU verify: all 3 packets decrypted to 0x000001 - accepting key\n");
                 if (!settings.benchmark) {
                     bfWriteKeyFoundFile(cw_out);
@@ -727,7 +715,7 @@ static void bruteForceGPU(const Settings& settings,
             bool reOK = false;
             for (int attempt = 0; attempt < 3 && !reOK; attempt++) {
                 reOK = ocl_search(ocl, probe, chunkStart, count, 0, 65536, cw2);
-                if (reOK && verifyCw(probedata, cw2)) {
+                if (reOK && verifyCw(probe, cw2)) {
                     printf("Re-run verify OK: %02X %02X %02X [%02X]  %02X %02X %02X [%02X]\n",
                            cw2[0], cw2[1], cw2[2], cw2[3],
                            cw2[4], cw2[5], cw2[6], cw2[7]);

@@ -15,8 +15,11 @@
    The CPU-verify gate in main.cpp stays regardless.
 
    Build:
-     g++ -std=c++17 -O2 -I src/ -I src/libdvbcsa/dvbcsa \
+     g++ -std=c++17 -O2 -DPARALLEL_MODE=3 -I src/ -I src/libdvbcsa/dvbcsa \
          bench_diag.cpp src/ts.c -o bench_diag -framework OpenCL
+        (PARALLEL_MODE must match the platform: 3=NEON/arm64, 2=SSE2/x86,
+         1=scalar. ts.c -> config.h selects the SIMD path and defaults to SSE2,
+         which fails to build on arm64, so this flag is required here.)
    Usage:
      ./bench_diag [wg] [gmax] [reps] [inner_count]
        wg           work-group (work-items) per threadgroup   (default 128)
@@ -54,6 +57,7 @@ int main(int argc, char **argv) {
     size_t  gmax        = (argc > 2) ? strtoul(argv[2], nullptr, 0) : 128;
     int     reps        = (argc > 3) ? atoi(argv[3])            :  4;
     uint32_t inner_count= (argc > 4) ? (uint32_t)strtoul(argv[4], nullptr, 0) : 65536;
+    size_t  step        = (argc > 5) ? strtoul(argv[5], nullptr, 0) :    0;
     uint32_t key_start  = 0x00000000;   /* far from the 0x7FFAE9A0 solution */
 
     unsigned char probedata[48];
@@ -72,8 +76,9 @@ int main(int argc, char **argv) {
 
     char dname[128];
     clGetDeviceInfo(dev, CL_DEVICE_NAME, sizeof(dname), dname, nullptr);
-    printf("device: %s  (wg=%zu, gmax=%zu, reps=%d, inner=%u)\n",
-           dname, wg, gmax, reps, inner_count);
+    printf("device: %s  (wg=%zu, gmax=%zu, reps=%d, inner=%u, %s)\n",
+           dname, wg, gmax, reps, inner_count,
+           step ? "linear" : "doubling");
 
     cl_context ctx = clCreateContext(nullptr, 1, &dev, nullptr, nullptr, &err);
     CK(err);
@@ -138,50 +143,53 @@ int main(int argc, char **argv) {
                                        &global, &wg, 0, nullptr, nullptr);
     };
 
-    bool any_fail = false;
-    for (size_t G = 1; G <= gmax; G *= 2) {
-        /* Include the bug-report boundary points explicitly. */
-        bool boundary = (G == 72 || G == 76) ? true : false;
+    /* Build the clean reference ONCE: single-group dispatches never corrupt,
+       and the per-gid checksum depends only on gid + the inner loop, so this
+       full-range prefix [0, gmax*wg) serves every candidate G. */
+    for (size_t g = 0; g < gmax; g++)
+        if (launch(refs, (uint32_t)(g * wg), 1) != CL_SUCCESS) { return 1; }
+    if (clFinish(q) != CL_SUCCESS) return 1;
+    if (clEnqueueReadBuffer(q, refs, CL_TRUE, 0, buf_items * 4,
+                            ref_h.data(), 0, nullptr, nullptr) != CL_SUCCESS)
+        return 1;
+
+    /* Candidate G: powers of two (step==0, default) or a fine linear step so
+       the ceiling can be pinpointed, not just bracketed to a power of two. */
+    std::vector<size_t> Gs;
+    if (step == 0) { for (size_t G = 1;    G <= gmax; G *= 2)   Gs.push_back(G); }
+    else             { for (size_t G = step; G <= gmax; G += step) Gs.push_back(G); }
+
+    size_t max_clean = 0;
+    bool   hit_fail  = false;
+    for (size_t G : Gs) {
+        bool clean = true;
         for (int r = 0; r < reps; r++) {
-            /* Reference: G sequential 1-threadgroup dispatches (clean). */
-            for (size_t g = 0; g < G; g++)
-                if (launch(refs, (uint32_t)(g * wg), 1) != CL_SUCCESS) { return 1; }
-            if (clFinish(q) != CL_SUCCESS) return 1;
-            if (clEnqueueReadBuffer(q, refs, CL_TRUE, 0, buf_items * 4,
-                                    ref_h.data(), 0, nullptr, nullptr) != CL_SUCCESS)
-                return 1;
-            /* Test: one dispatch of G threadgroups. */
+              /* Test: one G-group dispatch vs the clean prefix. */
             if (launch(test, 0, G) != CL_SUCCESS) return 1;
             if (clFinish(q) != CL_SUCCESS) return 1;
-            if (clEnqueueReadBuffer(q, test, CL_TRUE, 0, buf_items * 4,
+            if (clEnqueueReadBuffer(q, test, CL_TRUE, 0, G * wg * 4,
                                     tst_h.data(), 0, nullptr, nullptr) != CL_SUCCESS)
                 return 1;
-
-            size_t mism = 0; size_t first = (size_t)-1;
             for (size_t i = 0; i < G * wg; i++)
-                if (ref_h[i] != tst_h[i]) {
-                    if (mism == 0) first = i;
-                    mism++;
-                }
-            const char *tag = boundary ? " (boundary)" : "";
-            if (mism == 0) {
-                printf("G=%3zu groups x %3zu wg = %7zu items : PASS (rep %d)%s\n",
-                       G, wg, G * wg, r, tag);
-            } else {
-                any_fail = true;
-                printf("G=%3zu groups x %3zu wg = %7zu items : FAIL %zu/%zu mismatch "
-                       "first@%zu (rep %d)%s\n",
-                       G, wg, G * wg, mism, G * wg, first, r, tag);
-                break;   /* no point repeating a failed geometry */
-            }
+                if (ref_h[i] != tst_h[i]) { clean = false; break; }
+            if (!clean) break;
         }
-        if (any_fail) break;   /* first failure stops the sweep */
+        if (clean) {
+            max_clean = G;
+            printf("G=%4zu groups x %3zu wg = %7zu items : PASS\n", G, wg, G * wg);
+        } else {
+            hit_fail = true;
+            printf("G=%4zu groups x %3zu wg = %7zu items : FAIL\n", G, wg, G * wg);
+            break;         /* first failing G stops; larger cannot raise the cap */
+        }
     }
 
-    printf("RESULT: %s\n", any_fail ? "UNCLEAN (ceiling unchanged)"
-                                    : "CLEAN through tested ceiling");
+    printf("MAX CLEAN G = %zu groups x %3zu wg = %7llu items%s\n", max_clean, wg,
+           (unsigned long long)max_clean * wg,
+           hit_fail ? " -- ceiling is below gmax"
+                    : " -- clean through the tested ceiling");
     clReleaseMemObject(test); clReleaseMemObject(refs); clReleaseMemObject(probe);
     clReleaseKernel(k); clReleaseProgram(prog); clReleaseCommandQueue(q);
     clReleaseContext(ctx);
-    return any_fail ? 2 : 0;
+    return hit_fail ? 2 : 0;
 }
