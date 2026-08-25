@@ -51,8 +51,17 @@ else
     ifeq ($(UNAME_S),Darwin)
         OPENCL_ON := 1
     else
-        # Probe: does CL/cl.h compile and -lOpenCL link?
-        OPENCL_PROBE := $(shell printf '#include <CL/cl.h>\nint main(void){cl_int e=0;return e;}\n' > .ocl_probe.c && $(CC) .ocl_probe.c -lOpenCL -o /dev/null 2>/dev/null && echo yes; rm -f .ocl_probe.c)
+        # Probe compile+link with the SAME flags/order used for the real link
+        # (so we only enable OpenCL when it can actually be linked in).  On
+        # Linux the static build needs a static libOpenCL, otherwise linking
+        # the shared one under -static would fail.
+        OPENCL_LNK := -lOpenCL
+        ifeq ($(UNAME_S),Linux)
+            OPENCL_LNK := -static -lOpenCL
+        endif
+        # Probe: does CL/cl.h compile and does the OpenCL link succeed?
+        # (\# escapes the hash so GNU make does not treat `#include` as a comment.)
+        OPENCL_PROBE := $(shell printf '\#include <CL/cl.h>\nint main(void){cl_int e=0;return e;}\n' > .ocl_probe.c && $(CC) .ocl_probe.c $(OPENCL_LNK) -o /dev/null 2>/dev/null && echo yes; rm -f .ocl_probe.c)
         OPENCL_ON := $(if $(filter yes,$(OPENCL_PROBE)),1,)
     endif
 endif
