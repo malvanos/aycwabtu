@@ -10,8 +10,14 @@
 /* input transpose key from normal to bitslice
 uint8 key[BS_BATCH_SIZE][8]  -> dvbcsa_bs_word_t block row[64] */
 
-void aycw_key_transpose(const uint8 key[BS_BATCH_SIZE][8], dvbcsa_bs_word_t *row)
+/* NOTE: the parameter is declared `const uint8 *key_in` (matching the prototype
+   in bs_stream.h) and cast to the 2-D view below.  A direct `const uint8
+   key[BS_BATCH_SIZE][8]` parameter type would mangle to a DIFFERENT C++ symbol
+   than the call site in main.cpp (which passes uint8*), breaking the x86_64
+   SSE2 link: undefined reference to aycw_key_transpose. */
+void aycw_key_transpose(const uint8 *key_in, dvbcsa_bs_word_t *row)
 {
+   const uint8 (*key)[8] = (const uint8 (*)[8])key_in;
    unsigned int i, j, k;
 
    // copy key 0 and key 1 to to row 0

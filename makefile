@@ -35,6 +35,49 @@ ifeq ($(UNAME_S),Linux)
     LDFLAGS += -static -s
 endif
 
+# ---------------------------------------------------------------------
+# OpenCL support.
+#   WITH_OPENCL=1  force ON   WITH_OPENCL=0  force OFF
+#   default: auto-detect (macOS always has it; elsewhere we confirm the
+#   header is present and -lOpenCL actually links).
+# When OpenCL is unavailable the build still succeeds and runs CPU-only;
+# ocl.cpp/ocl.hpp degrade to stubs under !HAVE_OPENCL.
+# ---------------------------------------------------------------------
+ifeq ($(WITH_OPENCL),1)
+    OPENCL_ON := 1
+else ifeq ($(WITH_OPENCL),0)
+    OPENCL_ON :=
+else
+    ifeq ($(UNAME_S),Darwin)
+        OPENCL_ON := 1
+    else
+        # Probe compile+link with the SAME flags/order used for the real link
+        # (so we only enable OpenCL when it can actually be linked in).  On
+        # Linux the static build needs a static libOpenCL, otherwise linking
+        # the shared one under -static would fail.
+        OPENCL_LNK := -lOpenCL
+        ifeq ($(UNAME_S),Linux)
+            OPENCL_LNK := -static -lOpenCL
+        endif
+        # Probe: does CL/cl.h compile and does the OpenCL link succeed?
+        # (\# escapes the hash so GNU make does not treat `#include` as a comment.)
+        OPENCL_PROBE := $(shell printf '\#include <CL/cl.h>\nint main(void){cl_int e=0;return e;}\n' > .ocl_probe.c && $(CC) .ocl_probe.c $(OPENCL_LNK) -o /dev/null 2>/dev/null && echo yes; rm -f .ocl_probe.c)
+        OPENCL_ON := $(if $(filter yes,$(OPENCL_PROBE)),1,)
+    endif
+endif
+
+ifeq ($(OPENCL_ON),1)
+    CFLAGS  += -DHAVE_OPENCL
+    ifeq ($(UNAME_S),Darwin)
+        LDFLAGS += -framework OpenCL
+    else
+        LDFLAGS += -lOpenCL
+    endif
+    $(info OpenCL: enabled)
+else
+    $(info OpenCL: not found - building CPU-only (set WITH_OPENCL=1 to force, WITH_OPENCL=0 to disable when present))
+endif
+
 obj/%.o : src/%.c
 	@mkdir -p $(@D)
 	$(CC) -c -MD $(CFLAGS) -o obj/$*.o $<
@@ -45,6 +88,7 @@ obj/%.o : src/%.cpp
 
 ayc_src = \
 	main.cpp           \
+	ocl.cpp            \
 	bs_algo.c          \
 	bs_block.c         \
 	bs_block_ab.c      \
