@@ -11,7 +11,8 @@ It uses parallel bit slice technique. Other csa parallel bit slice implementatio
 
 features
 --------
-* fast brute force key calculation due to bit sliced crack algorithm (SSE2, NEON, OpenCL/GPU, and 32-bit scalar versions available)
+* fast brute force key calculation due to bit sliced crack algorithm (SSE2, NEON, and 32-bit scalar CPU versions available)
+* **OpenCL / GPU support** — `-g` flag offloads the brute force to the GPU via an OpenCL kernel (`src/aycwabtu.cl`)
 * **multi-threaded** — `-p <n>` splits the key space across n parallel threads (near-linear scaling)
 * open source. License: GPL
 * read three encrypted data packets from ts file with many checks for valid data
@@ -36,7 +37,6 @@ OpenCL **GPU** (Apple M2 Pro): **~86 Mcw/s** (best single result)
 
 to do list
 ----------
-* NEON SIMD support for ARM (128-bit batch, ~4x single-thread gain)
 * support for 256 bits parallel with advanced vector extensions AVX2
 * optimize the block sbox boolean equations. Only slightly faster with 128 bits. See da_diett.pdf Chpt. 3.1
 * Ctrl-C handling on linux/windows
