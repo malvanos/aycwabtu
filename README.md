@@ -11,7 +11,7 @@ It uses parallel bit slice technique. Other csa parallel bit slice implementatio
 
 features
 --------
-* fast brute force key calculation due to bit sliced crack algorithm (SSE2, NEON, and 32-bit scalar versions available)
+* fast brute force key calculation due to bit sliced crack algorithm (SSE2, NEON, OpenCL/GPU, and 32-bit scalar versions available)
 * **multi-threaded** — `-p <n>` splits the key space across n parallel threads (near-linear scaling)
 * open source. License: GPL
 * read three encrypted data packets from ts file with many checks for valid data
@@ -32,11 +32,12 @@ Single-thread (NEON SIMD, 128-bit batch): **~9.5 Mcw/s**
 | 4       | 38    | 4.0x    |
 | 8       | 68    | 7.2x    |
 
+OpenCL **GPU** (Apple M2 Pro): **~86 Mcw/s** (best single result)
+
 to do list
 ----------
 * NEON SIMD support for ARM (128-bit batch, ~4x single-thread gain)
 * support for 256 bits parallel with advanced vector extensions AVX2
-* OpenCL / GPU support
 * optimize the block sbox boolean equations. Only slightly faster with 128 bits. See da_diett.pdf Chpt. 3.1
 * Ctrl-C handling on linux/windows
 * implement self-test mode (-s flag)
@@ -44,6 +45,7 @@ to do list
 
 recent updates (2026-07)
 ------------------------
+* **OpenCL / GPU support** — bit sliced brute force offloaded to the GPU via OpenCL (kernel in `src/aycwabtu.cl`, `-g` flag). Single-result, ~85.9 Mcw/s on an Apple M2 Pro vs ~68 Mcw/s for 8 CPU threads
 * **NEON SIMD support** — ARM64 128-bit SIMD via NEON intrinsics, 2.7x faster single-thread throughput on Apple Silicon
 * **Multi-threading** — `-p <n>` flag for parallel brute force across n threads with near-linear scaling
 * **C++17 conversion** — rewritten main in C++17 with Settings struct, exception-based error handling, `std::string_view` argument parsing, `std::thread` parallelism, `std::atomic` coordination
