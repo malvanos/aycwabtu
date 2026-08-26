@@ -725,6 +725,143 @@ static void bruteForceGPU(const Settings& settings,
 }
 
 /* --------------------------------------------------------------------------
+   Self-test mode
+   -------------------------------------------------------------------------- */
+/* Runs two independent correctness checks and exits:
+     1. Bit-sliced test cases: decrypt bs_tc_crypteddata with the whole
+        batch of known bs_tc_keys and compare against bs_tc_expected.
+     2. End-to-end brute force: search the internal demo data over a single
+        outer key and require the known key (00 11 22 33 44 00 00 44) to be
+        found and verified by the libdvbcsa reference decryptor.
+   Any failure returns a non-zero exit code (suitable for CI / `make check`).
+   -------------------------------------------------------------------------- */
+static void selfTest() {
+    cout << "Algorithm self-test\n"
+         << "  bit-slice batch size : " << BS_BATCH_SIZE << " keys\n"
+         << "  parallel mode        : "
+#if PARALLEL_MODE == PARALLEL_128_NEON
+         << "NEON (128-bit)\n"
+#elif PARALLEL_MODE == PARALLEL_128_SSE2
+         << "SSE2 (128-bit)\n"
+#else
+         << "scalar 32-bit\n"
+#endif
+         << "----------------------------------------\n";
+
+    /* ---------- Test 1: bit-sliced algorithm vs libdvbcsa reference ---------- */
+    /* Drives the exact decrypt pipeline the brute force uses (stream ->
+       block -> xor), for the whole batch of known test keys, and cross-checks
+       the DB0 plaintext of every slice against the libdvbcsa reference. */
+    dvbcsa_bs_word_t bs_data_sb0[8 * 16];
+    dvbcsa_bs_word_t bs_data_ib0[8 * 16];
+    dvbcsa_bs_word_t keys_bs[64];
+    dvbcsa_bs_word_t keyskk[448];
+#ifdef USEBLOCKVIRTUALSHIFT
+    dvbcsa_bs_word_t r[8 * (1 + 8 + 56)];
+#else
+    dvbcsa_bs_word_t r[8 * (1 + 8 + 0)];
+#endif
+
+    aycw_init_block();
+    aycw_init_stream(bs_tc_crypteddata, bs_data_sb0);
+
+    for (int i = 0; i < 8 * 8; i++) bs_data_ib0[i] = bs_data_sb0[i];
+#ifndef USEALLBITSLICE
+    aycw_bit2byteslice(bs_data_ib0, 1);
+#endif
+
+    /* transpose the whole batch of known test keys into bit-sliced form */
+    aycw_key_transpose((const uint8 *)&bs_tc_keys[0][0], keys_bs);
+
+    /* 1a. round-trip: transpose(p) then extract(p) must reproduce the keys */
+    for (int b = 0; b < BS_BATCH_SIZE; b++) {
+        uint8 cw[8];
+        aycw_extractbsdata(keys_bs, (unsigned char)b, 64, cw);
+        if (memcmp(cw, &bs_tc_keys[b][0], 8) != 0) {
+            cerr << "FAIL: key transpose round-trip mismatch for slice "
+                 << b << "\n";
+            exit(ERR_FATAL);
+        }
+    }
+    cout << "[1a/2b] key transpose round-trip: PASSED\n";
+
+    /* stream decrypt (24 bits -> DB0[0..2], as used by the PES check) */
+    aycw_stream_decrypt(&bs_data_ib0[64], 24, keys_bs, bs_data_sb0);
+#ifndef USEALLBITSLICE
+    aycw_bit2byteslice(&bs_data_ib0[64], 1);
+#endif
+
+    /* block decrypt */
+#ifdef USEBLOCKVIRTUALSHIFT
+    std::memcpy(&r[8 * 56], bs_data_ib0, 8 * 8 * sizeof(dvbcsa_bs_word_t));
+#else
+    std::memcpy(r, bs_data_ib0, 8 * 8 * sizeof(dvbcsa_bs_word_t));
+#endif
+    aycw_block_key_schedule(keys_bs, keyskk);
+#ifndef USEALLBITSLICE
+    aycw_bit2byteslice(keyskk, 7);
+#endif
+    aycw_block_decrypt(keyskk, r);
+
+    /* block XOR stream -> DB0 plaintext bytes (first 3 bytes are the PES
+       start-code we cross-check below; the bytes beyond are block-only) */
+    aycw_bs_xor24(r, r, &bs_data_ib0[64]);
+
+    for (int b = 0; b < BS_BATCH_SIZE; b++) {
+        dvbcsa_key_t key;
+        uint8 cw[8], ref[16], rc[8];
+
+        /* Matlab/slice b key, reference-decrypt with libdvbcsa */
+        aycw_extractbsdata(keys_bs, (unsigned char)b, 64, cw);
+        dvbcsa_key_set(cw, &key);
+        memcpy(ref, bs_tc_crypteddata, 16);
+        dvbcsa_decrypt(&key, ref, 16);
+
+        /* Bitsliced DB0 plaintext (bytes 0..2 feed the PES check) */
+        aycw_extractbsdata(r, (unsigned char)b, 4 * 8, rc);
+
+        if (memcmp(ref, rc, 3) != 0) {
+            cerr << "FAIL: bit-sliced decrypt for slice " << b << " (key ";
+            for (int k = 0; k < 8; k++) cerr << (k ? ":" : "") << hex
+                << (int)cw[k] << dec;
+            cerr << ") differs from libdvbcsa\n";
+            exit(ERR_FATAL);
+        }
+    }
+    cout << "[1b/2b] bit-sliced decrypt vs libdvbcsa (";
+    cout << BS_BATCH_SIZE << " keys): PASSED\n";
+
+    /* ---------- Test 2: end-to-end known-key brute force ---------- */
+    /* Internal demo packets (same as benchmark mode).  The known key
+       00 11 22 33  44 00 00 44 decrypts all three to a 0x000001 PES header.
+       Outer key (bytes 0,1,2,4) == 00 11 22 44; bytes 5,6 are the inner
+       loop, so a single-outer-key range finds it on the first inner key. */
+    unsigned char probedata[3][16] = {
+        { 0xB2, 0x74, 0x85, 0x51, 0xF9, 0x3C, 0x9B, 0xD2,
+          0x30, 0x9E, 0x8E, 0x78, 0xFB, 0x16, 0x55, 0xA9 },
+        { 0x25, 0x2D, 0x3D, 0xAB, 0x5E, 0x3B, 0x31, 0x39,
+          0xFE, 0xDF, 0xCD, 0x84, 0x51, 0x5A, 0x86, 0x4A },
+        { 0xD0, 0xE1, 0x78, 0x48, 0xB3, 0x41, 0x63, 0x22,
+          0x25, 0xA3, 0x63, 0x0A, 0x0E, 0xD3, 0x1C, 0x70 }
+    };
+
+    cout << "[2/2] end-to-end known-key brute force\n";
+    cout << "      searching outer key 00 11 22 44 for key "
+         << "00 11 22 33  44 00 00 44\n";
+
+    atomic<int> keyFound{0};
+    /* isBenchmark=true -> no resume/keyfound files are written.  bruteForceRange
+       prints "KEY FOUND!!!" and exits(OK) as soon as the key is found and
+       libdvbcsa-verified, so reaching the line after it means the search failed
+       and we report FAIL below. */
+    bruteForceRange(0x00112244, 0x00112244, probedata,
+                    /*isBenchmark=*/true, /*tid=*/0, /*nThreads=*/1, keyFound);
+
+    cerr << "\nFAIL: known key was not found during the end-to-end search\n";
+    exit(ERR_FATAL);
+}
+
+/* --------------------------------------------------------------------------
    main
    -------------------------------------------------------------------------- */
 int main(int argc, char *argv[]) {
@@ -740,18 +877,19 @@ int main(int argc, char *argv[]) {
     }
 
     /* Validate arguments */
-    if (settings.selftest) {
-        cout << "Option self-test not available yet, sorry" << endl;
-        return EXIT_SUCCESS;
-    }
-
-    if (!settings.benchmark && settings.tsFilename.empty()) {
+    if (!settings.benchmark && !settings.selftest && settings.tsFilename.empty()) {
         cerr << "Neither ts filename provided nor benchmark enabled" << endl;
         printUsage();
         return ERR_USAGE;
     }
 
     printBanner(settings);
+
+    /* Algorithm self test and quit */
+    if (settings.selftest) {
+        selfTest();
+        return EXIT_SUCCESS;
+    }
 
     /* Read resume file for non-benchmark runs (single-threaded only) */
     if (!settings.benchmark && settings.numThreads == 1) {

@@ -93,6 +93,7 @@ ayc_src = \
 	bs_block.c         \
 	bs_block_ab.c      \
 	bs_stream.c        \
+	bs_testcases.c     \
 	ts.c
 
 ifeq ($(UNAME_M),x86_64)

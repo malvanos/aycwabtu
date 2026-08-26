@@ -14,6 +14,8 @@ features
 * fast brute force key calculation due to bit sliced crack algorithm (SSE2, NEON, and 32-bit scalar CPU versions available)
 * **OpenCL / GPU support** — `-g` flag offloads the brute force to the GPU via an OpenCL kernel (`src/aycwabtu.cl`)
 * **multi-threaded** — `-p <n>` splits the key space across n parallel threads (near-linear scaling)
+* **self-test** — `-s` verifies the algorithm against known vectors and a known-key
+  brute force, then exits (returns 0 on success, 16 on failure — CI-friendly)
 * open source. License: GPL
 * read three encrypted data packets from ts file with many checks for valid data
 * writes a small probe ts file with these packets for sharing and distributed attack
@@ -40,7 +42,6 @@ to do list
 * support for 256 bits parallel with advanced vector extensions AVX2
 * optimize the block sbox boolean equations. Only slightly faster with 128 bits. See da_diett.pdf Chpt. 3.1
 * Ctrl-C handling on linux/windows
-* implement self-test mode (-s flag)
 * block decrypt first (does not depend on stream). Then stream afterwards, stop XORing immediately if foreseeable there is no PES header
 
 recent updates (2026-07)
