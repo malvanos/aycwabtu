@@ -54,10 +54,12 @@ struct Settings {
 /* --------------------------------------------------------------------------
    Forward declarations
    -------------------------------------------------------------------------- */
+struct BFShared;
 static void bruteForceRange(uint32_t keyStart, uint32_t keyStop,
                             const unsigned char probedata[3][16],
                             bool isBenchmark, int tid, int nThreads,
-                            atomic<int>& keyFound);
+                            atomic<int>& keyFound,
+                            BFShared* shared = nullptr);
 static void bruteForceParallel(const Settings& settings,
                                unsigned char probedata[3][16]);
 static void bruteForceGPU(const Settings& settings,
@@ -94,6 +96,16 @@ struct BFState {
     int      totalloops   = 0;
     int      divider      = 0;
     bool     benchmark;
+};
+
+/* Shared cross-thread progress.  Each thread adds the keys it processed to
+   keysDone; thread 0 samples that counter and reports the AGGREGATE rate over
+   all threads.  Used only in multi-threaded mode. */
+struct BFShared {
+    std::atomic<uint64_t> keysDone{0};
+    uint64_t lastKeys  = 0;
+    uint64_t lastTicks = 0;
+    int      reports   = 0;
 };
 
 static void bfPerformanceStart(BFState& st) {
@@ -140,6 +152,40 @@ static void bfPerfShow(BFState& st, int tid) {
         }
     }
 #undef DIVIDER
+}
+
+/* Aggregate progress: called by thread 0 only.  Reads the shared keysDone
+   counter (which all threads keep bumping) and reports the combined Mcw/s.
+   This is why -p N visibly shows ~N x the single-thread rate. */
+static void bfPerfAggregate(BFShared& sh, int nThreads, const BFState& st) {
+    static const char prop[] = "|/-\\";
+
+    uint64_t now  = getTicksMs();
+    uint64_t keys = sh.keysDone.load(std::memory_order_relaxed);
+
+    if (sh.reports == 0) {
+        sh.lastKeys  = keys;
+        sh.lastTicks = now;
+        sh.reports++;
+        return;
+    }
+
+    uint64_t dk = keys - sh.lastKeys;
+    uint64_t dt = now - sh.lastTicks;
+    sh.lastKeys  = keys;
+    sh.lastTicks = now;
+    sh.reports++;
+
+    putc(prop[(sh.reports & 3)], stdout);
+    if (dt) {
+        printf(" %.3f Mcw/s aggregate (%d threads)  ",
+               dk / (double)dt / 1000.0, nThreads);
+    }
+    printf("[T0] %02X %02X %02X [] %02X .. .. []\r",
+           st.currentkey32 >> 24,
+           st.currentkey32 >> 16 & 0xFF,
+           st.currentkey32 >> 8 & 0xFF,
+           st.currentkey32 & 0xFF);
 }
 
 /* --------------------------------------------------------------------------
@@ -398,8 +444,9 @@ static void benchmark(Settings& settings) {
    -------------------------------------------------------------------------- */
 static void bruteForceRange(uint32_t keyStart, uint32_t keyStop,
                             const unsigned char probedata[3][16],
-                            bool isBenchmark, int tid, int /*nThreads*/,
-                            atomic<int>& keyFound) {
+                            bool isBenchmark, int tid, int nThreads,
+                            atomic<int>& keyFound,
+                            BFShared* shared) {
     int i, k;
 
     dvbcsa_bs_word_t bs_data_sb0[8 * 16];
@@ -543,8 +590,17 @@ static void bruteForceRange(uint32_t keyStart, uint32_t keyStop,
             aycw_bs_increment_keys_inner(keys_bs);
         }
 
-        if (tid <= 0)  // only thread 0 prints progress
+        /* count the 2^16 keys this outer-loop iteration just processed */
+        if (shared) shared->keysDone.fetch_add(KEYSPERINNERLOOP,
+                                               std::memory_order_relaxed);
+
+        if (shared) {
+            /* multi-threaded: thread 0 prints the aggregate rate */
+            if (tid == 0) bfPerfAggregate(*shared, nThreads, st);
+        } else if (tid <= 0) {
+            /* single-threaded: keep the old per-thread display */
             bfPerfShow(st, tid);
+        }
 
         if (!st.benchmark) bfWriteResumeFile(st, tid);
 
@@ -570,6 +626,7 @@ static void bruteForceParallel(const Settings& settings,
            nThreads, chunk);
 
     atomic<int> keyFound{0};
+    BFShared shared;                      // cross-thread aggregate counter
     vector<thread> threads;
     threads.reserve(nThreads - 1);
 
@@ -578,14 +635,14 @@ static void bruteForceParallel(const Settings& settings,
         uint32_t stop  = (t == nThreads - 1) ? settings.keystop : (start + chunk - 1);
         threads.emplace_back(bruteForceRange, start, stop,
                              probedata, settings.benchmark,
-                             t, nThreads, ref(keyFound));
+                             t, nThreads, ref(keyFound), &shared);
     }
 
     /* Thread 0 runs in the main thread */
     uint32_t start0 = settings.keystart;
     uint32_t stop0  = (nThreads == 1) ? settings.keystop : (start0 + chunk - 1);
     bruteForceRange(start0, stop0, probedata, settings.benchmark,
-                    0, nThreads, keyFound);
+                    0, nThreads, keyFound, &shared);
 
     /* Wait for all worker threads */
     for (auto& t : threads) {
