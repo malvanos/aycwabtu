@@ -11,7 +11,7 @@ It uses parallel bit slice technique. Other csa parallel bit slice implementatio
 
 features
 --------
-* fast brute force key calculation due to bit sliced crack algorithm (SSE2, NEON, and 32-bit scalar CPU versions available)
+* fast brute force key calculation due to bit sliced crack algorithm (AVX2, SSE2, NEON, and 32-bit scalar CPU versions available)
 * **OpenCL / GPU support** — `-g` flag offloads the brute force to the GPU via an OpenCL kernel (`src/aycwabtu.cl`)
 * **multi-threaded** — `-p <n>` splits the key space across n parallel threads (near-linear scaling)
 * **self-test** — `-s` verifies the algorithm against known vectors and a known-key
@@ -37,12 +37,23 @@ Single-thread (NEON SIMD, 128-bit batch): **~9.5 Mcw/s**
 
 OpenCL **GPU** (Apple M2 Pro): **~86 Mcw/s** (best single result)
 
+performance (x86_64)
+--------------------
+Single-thread (AVX2 SIMD, 256-bit batch): **~23.6 Mcw/s**
+Single-thread (SSE2 SIMD, 128-bit batch): **~12.8 Mcw/s** (AVX2 ≈ 1.8× faster)
+
 to do list
 ----------
-* support for 256 bits parallel with advanced vector extensions AVX2
+* pin the search thread(s) to a specific core (CPU affinity)
+* auto-set the number of threads from the number of available cores (fall back to a sensible default)
+* auto-detect the CPU at run time and pick the best SIMD instruction set (AVX2/SSE2/NEON/scalar) instead of a build-time flag
 * optimize the block sbox boolean equations. Only slightly faster with 128 bits. See da_diett.pdf Chpt. 3.1
 * Ctrl-C handling on linux/windows
 * block decrypt first (does not depend on stream). Then stream afterwards, stop XORing immediately if foreseeable there is no PES header
+
+recent updates
+--------------
+* **AVX2 SIMD support** — 256-bit parallel mode on x86_64 (`SIMD=avx2`, `PARALLEL_256_AVX2`, batch of 256 keys/register). ~23.6 Mcw/s single-thread vs ~12.8 Mcw/s for SSE2 (~1.8×), selectable in the makefile alongside SSE2/NEON/scalar
 
 recent updates (2026-07)
 ------------------------
