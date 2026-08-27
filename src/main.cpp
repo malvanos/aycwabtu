@@ -800,6 +800,8 @@ static void selfTest() {
          << "NEON (128-bit)\n"
 #elif PARALLEL_MODE == PARALLEL_128_SSE2
          << "SSE2 (128-bit)\n"
+#elif PARALLEL_MODE == PARALLEL_256_AVX2
+         << "AVX2 (256-bit)\n"
 #else
          << "scalar 32-bit\n"
 #endif
@@ -827,14 +829,29 @@ static void selfTest() {
     aycw_bit2byteslice(bs_data_ib0, 1);
 #endif
 
-    /* transpose the whole batch of known test keys into bit-sliced form */
-    aycw_key_transpose((const uint8 *)&bs_tc_keys[0][0], keys_bs);
+    /* Build a full deterministic batch of size BS_BATCH_SIZE so the round
+       trip and decrypt checks cover every slice, independent of the fixed
+       128-entry bs_tc_keys table. */
+    uint8 tc_keys[BS_BATCH_SIZE][8];
+    for (int b = 0; b < BS_BATCH_SIZE; b++) {
+        tc_keys[b][0] = 0x01;
+        tc_keys[b][1] = 0x02;
+        tc_keys[b][2] = 0x03;
+        tc_keys[b][3] = 0x01 + 0x02 + 0x03;
+        tc_keys[b][4] = (uint8)(b >> 8);
+        tc_keys[b][5] = (uint8)(b & 0xFF);
+        tc_keys[b][6] = 0;
+        tc_keys[b][7] = tc_keys[b][4] + tc_keys[b][5] + tc_keys[b][6];
+    }
+
+    /* transpose the whole batch of keys into bit-sliced form */
+    aycw_key_transpose((const uint8 *)&tc_keys[0][0], keys_bs);
 
     /* 1a. round-trip: transpose(p) then extract(p) must reproduce the keys */
     for (int b = 0; b < BS_BATCH_SIZE; b++) {
         uint8 cw[8];
         aycw_extractbsdata(keys_bs, (unsigned char)b, 64, cw);
-        if (memcmp(cw, &bs_tc_keys[b][0], 8) != 0) {
+        if (memcmp(cw, &tc_keys[b][0], 8) != 0) {
             cerr << "FAIL: key transpose round-trip mismatch for slice "
                  << b << "\n";
             exit(ERR_FATAL);

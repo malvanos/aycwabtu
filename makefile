@@ -8,6 +8,9 @@ LD          = g++
 
 SHELL=bash
 
+# SIMD backend for x86_64: sse2 (default, 128-bit) or avx2 (256-bit)
+SIMD ?= sse2
+
 GITHASH := $(shell git rev-parse --short HEAD)
 
 CFLAGS      = \
@@ -21,7 +24,11 @@ CFLAGS      = \
     -DGITHASH=\"$(GITHASH)\"
 
 ifeq ($(UNAME_M),x86_64)
-    CFLAGS += -msse2 -msse4.2 -DPARALLEL_MODE=2
+    ifeq ($(SIMD),avx2)
+        CFLAGS += -msse2 -msse4.2 -mavx2 -DPARALLEL_MODE=4
+    else
+        CFLAGS += -msse2 -msse4.2 -DPARALLEL_MODE=2
+    endif
 else ifeq ($(UNAME_M),arm64)
     CFLAGS += -DPARALLEL_MODE=3
 else ifeq ($(UNAME_M),aarch64)
@@ -97,7 +104,7 @@ ayc_src = \
 	ts.c
 
 ifeq ($(UNAME_M),x86_64)
-    ayc_src += bs_sse2.c
+    ayc_src += bs_sse2.c bs_avx2.c
 else ifeq ($(UNAME_M),arm64)
     ayc_src += bs_neon.c
 else ifeq ($(UNAME_M),aarch64)
