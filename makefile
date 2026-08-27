@@ -39,14 +39,39 @@ endif
 
 LDFLAGS     = -flto
 ifeq ($(UNAME_S),Linux)
-    LDFLAGS += -static -s
+    LDFLAGS += -s   # + -static added below for CPU-only (non-OpenCL) builds
+endif
+
+OPENCL_ON :=
+
+# Per-platform OpenCL link flags, used for both the auto-detect probe and the
+# real link so what we test is exactly what we link.
+#   Darwin: OpenCL ships with macOS -> link via -framework OpenCL.
+#   Linux : Mesa/ocl-icd install the runtime libOpenCL.so.1; the dev symlink
+#           libOpenCL.so comes separately (ocl-icd-opencl-dev). Prefer -lOpenCL
+#           and fall back to the runtime lib by exact name so linking works
+#           with just the base install.
+#   other : plain -lOpenCL
+ifeq ($(UNAME_S),Darwin)
+    OPENCL_LIB := -framework OpenCL
+else ifeq ($(UNAME_S),Linux)
+    BPATH := /usr/lib/$(shell $(CC) -dumpmachine)
+    ifeq ($(shell test -f $(BPATH)/libOpenCL.so && echo yes),yes)
+        OPENCL_LIB := -lOpenCL
+    else ifeq ($(shell test -f $(BPATH)/libOpenCL.so.1 && echo yes),yes)
+        OPENCL_LIB := -L$(BPATH) -l:libOpenCL.so.1
+    else
+        OPENCL_LIB := -lOpenCL
+    endif
+else
+    OPENCL_LIB := -lOpenCL
 endif
 
 # ---------------------------------------------------------------------
-# OpenCL support.
-#   WITH_OPENCL=1  force ON   WITH_OPENCL=0  force OFF
-#   default: auto-detect (macOS always has it; elsewhere we confirm the
-#   header is present and -lOpenCL actually links).
+# Decide whether OpenCL is used.
+#   WITH_OPENCL=1 force ON    WITH_OPENCL=0 force OFF
+#   default: auto-detect (macOS always has it; elsewhere probe a tiny
+#   program that includes <CL/cl.h> and links with OPENCL_LIB).
 # When OpenCL is unavailable the build still succeeds and runs CPU-only;
 # ocl.cpp/ocl.hpp degrade to stubs under !HAVE_OPENCL.
 # ---------------------------------------------------------------------
@@ -54,35 +79,30 @@ ifeq ($(WITH_OPENCL),1)
     OPENCL_ON := 1
 else ifeq ($(WITH_OPENCL),0)
     OPENCL_ON :=
+else ifeq ($(UNAME_S),Darwin)
+    OPENCL_ON := 1
 else
-    ifeq ($(UNAME_S),Darwin)
-        OPENCL_ON := 1
-    else
-        # Probe compile+link with the SAME flags/order used for the real link
-        # (so we only enable OpenCL when it can actually be linked in).  On
-        # Linux the static build needs a static libOpenCL, otherwise linking
-        # the shared one under -static would fail.
-        OPENCL_LNK := -lOpenCL
-        ifeq ($(UNAME_S),Linux)
-            OPENCL_LNK := -static -lOpenCL
-        endif
-        # Probe: does CL/cl.h compile and does the OpenCL link succeed?
-        # (\# escapes the hash so GNU make does not treat `#include` as a comment.)
-        OPENCL_PROBE := $(shell printf '\#include <CL/cl.h>\nint main(void){cl_int e=0;return e;}\n' > .ocl_probe.c && $(CC) .ocl_probe.c $(OPENCL_LNK) -o /dev/null 2>/dev/null && echo yes; rm -f .ocl_probe.c)
-        OPENCL_ON := $(if $(filter yes,$(OPENCL_PROBE)),1,)
-    endif
+    # (\# escapes the hash so GNU make does not treat `#include` as a comment.)
+    OPENCL_PROBE := $(shell printf '\#include <CL/cl.h>\nint main(void){cl_int e=0;return e;}\n' > .ocl_probe.c && $(CC) .ocl_probe.c $(OPENCL_LIB) -o /dev/null 2>/dev/null && echo yes; rm -f .ocl_probe.c)
+    OPENCL_ON := $(if $(filter yes,$(OPENCL_PROBE)),1,)
 endif
 
 ifeq ($(OPENCL_ON),1)
     CFLAGS  += -DHAVE_OPENCL
-    ifeq ($(UNAME_S),Darwin)
-        LDFLAGS += -framework OpenCL
-    else
-        LDFLAGS += -lOpenCL
-    endif
+    LDLIBS  += $(OPENCL_LIB)
     $(info OpenCL: enabled)
 else
     $(info OpenCL: not found - building CPU-only (set WITH_OPENCL=1 to force, WITH_OPENCL=0 to disable when present))
+endif
+
+# A fully-static (-static) Linux binary is self-contained but cannot link the
+# shared OpenCL runtime, so keep -static for the CPU-only build and link
+# dynamic (shared OpenCL) when OpenCL is enabled. macOS links the framework
+# either way.
+ifeq ($(UNAME_S),Linux)
+    ifneq ($(OPENCL_ON),1)
+        LDFLAGS += -static
+    endif
 endif
 
 obj/%.o : src/%.c
@@ -130,11 +150,11 @@ all: aycwabtu
    
 
 aycwabtu: $(ayc_obj) $(libdvbcsa_obj)
-	$(LD) $(LDFLAGS) -o $@ $(ayc_obj) $(libdvbcsa_obj)
+	$(LD) $(LDFLAGS) -o $@ $(ayc_obj) $(libdvbcsa_obj) $(LDLIBS)
 	@echo $@ created
 
 tsgen: $(tsgen_obj) $(libdvbcsa_obj)
-	$(LD) $(LDFLAGS) -o $@ $(tsgen_obj) $(libdvbcsa_obj)
+	$(LD) $(LDFLAGS) -o $@ $(tsgen_obj) $(libdvbcsa_obj) $(LDLIBS)
 	@echo $@ created
 
 

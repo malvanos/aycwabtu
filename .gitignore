@@ -34,3 +34,6 @@ bench_ocl
 ocl_info
 *.new
 *.bak
+
+# local agent scratch
+.claude/

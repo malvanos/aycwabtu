@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <vector>
 
 /* Embedded kernel source (loaded from file or embedded string) */
 static const char* get_kernel_source();
@@ -27,28 +28,89 @@ bool ocl_init(OclContext& ocl, const char* kernel_source) {
     ocl.ready = false;
 
     cl_int err;
-    cl_platform_id platform;
-    cl_uint num_platforms;
+    cl_platform_id platform = nullptr;
+    cl_uint num_platforms = 0;
 
-    err = clGetPlatformIDs(1, &platform, &num_platforms);
+    err = clGetPlatformIDs(0, nullptr, &num_platforms);
     if (err != CL_SUCCESS || num_platforms == 0) {
         std::cerr << "OpenCL: no platforms found" << std::endl;
         return false;
     }
 
-    /* Print platform name */
+    std::vector<cl_platform_id> platforms(num_platforms);
+    err = clGetPlatformIDs(num_platforms, platforms.data(), nullptr);
+    if (err != CL_SUCCESS) {
+        std::cerr << "OpenCL: failed to enumerate platforms" << std::endl;
+        return false;
+    }
+
+    /* Candidate platforms that may be overridden by the env var below. */
+    std::vector<cl_platform_id> preferred;
+    std::vector<cl_platform_id> fallback;
+    cl_uint    gpu_devs  = 0;
+    cl_uint    cpu_devs  = 0;
+    bool       found_dev = false;
+
+    /* First pass: remember which platforms expose a GPU device, so we can
+       prefer one over the pure-CPU OpenCL runtimes (e.g. PoCL).  ROCm's
+       "AMD Accelerated Parallel Processing" platform reports the installed
+       Radeon as CL_DEVICE_TYPE_GPU. */
+    for (cl_uint i = 0; i < num_platforms; ++i) {
+        char pname[256] = {0};
+        clGetPlatformInfo(platforms[i], CL_PLATFORM_NAME, sizeof(pname),
+                          pname, nullptr);
+        std::cout << "OpenCL platform: " << pname << std::endl;
+
+        cl_uint ng = 0;
+        if (clGetDeviceIDs(platforms[i], CL_DEVICE_TYPE_GPU, 0, nullptr, &ng)
+                == CL_SUCCESS && ng > 0) {
+            preferred.push_back(platforms[i]);
+            if (gpu_devs == 1) gpu_devs = ng; // any GPU platform present
+        }
+        cl_uint nc = 0;
+        if (clGetDeviceIDs(platforms[i], CL_DEVICE_TYPE_CPU, 0, nullptr, &nc)
+                == CL_SUCCESS && nc > 0) {
+            fallback.push_back(platforms[i]);
+        }
+    }
+
+    /* Optional: force a specific platform by name (here the ROCm one). */
+    const char* env_plat = std::getenv("AYCWABTU_OCL_PLATFORM");
+    if (env_plat && env_plat[0]) {
+        for (cl_uint i = 0; i < num_platforms; ++i) {
+            char pname[256] = {0};
+            clGetPlatformInfo(platforms[i], CL_PLATFORM_NAME, sizeof(pname),
+                              pname, nullptr);
+            if (strstr(pname, env_plat)) { platform = platforms[i]; break; }
+        }
+    }
+
+    /* Otherwise: a GPU-bearing platform is preferred; else fall back to CPU. */
+    cl_uint dev_type = CL_DEVICE_TYPE_GPU;
+    if (!platform) {
+        if (!preferred.empty()) platform = preferred[0];
+        else if (!fallback.empty()) { platform = fallback[0]; dev_type = CL_DEVICE_TYPE_CPU; }
+    }
+    if (!platform) {
+        std::cerr << "OpenCL: no usable platform" << std::endl;
+        return false;
+    }
+
     char platform_name[256];
     clGetPlatformInfo(platform, CL_PLATFORM_NAME, sizeof(platform_name),
                       platform_name, nullptr);
-    std::cout << "OpenCL platform: " << platform_name << std::endl;
+    std::cout << "OpenCL: using platform " << platform_name << std::endl;
 
-    /* Get GPU device */
-    err = clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1,
-                         &ocl.device, nullptr);
+    /* Get a device of the preferred type on the selected platform. */
+    err = clGetDeviceIDs(platform, dev_type, 1, &ocl.device, nullptr);
     if (err != CL_SUCCESS) {
-        std::cerr << "OpenCL: no GPU device found, trying CPU..." << std::endl;
-        err = clGetDeviceIDs(platform, CL_DEVICE_TYPE_CPU, 1,
-                             &ocl.device, nullptr);
+        /* Device type we wanted isn't available here; try the other one. */
+        std::cout << "OpenCL: no "
+                  << (dev_type == CL_DEVICE_TYPE_GPU ? "GPU" : "CPU")
+                  << " device, trying the other type..." << std::endl;
+        cl_uint other = (dev_type == CL_DEVICE_TYPE_GPU)
+                            ? CL_DEVICE_TYPE_CPU : CL_DEVICE_TYPE_GPU;
+        err = clGetDeviceIDs(platform, other, 1, &ocl.device, nullptr);
         if (err != CL_SUCCESS) {
             std::cerr << "OpenCL: no device found" << std::endl;
             return false;

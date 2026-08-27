@@ -42,6 +42,38 @@ performance (x86_64)
 Single-thread (AVX2 SIMD, 256-bit batch): **~23.6 Mcw/s**
 Single-thread (SSE2 SIMD, 128-bit batch): **~12.8 Mcw/s** (AVX2 ≈ 1.8× faster)
 
+performance (Linux x86_64, AMD Radeon RX 6600 / ROCm OpenCL)
+------------------------------------------------------------
+AMD Ryzen 7 5700X (8 cores / 16 threads), Radeon RX 6600 (gfx1032).
+
+| Threads | Mcw/s | Scaling |
+|---------|-------|---------|
+| 1       | 12.7  | 1.0x    |
+| 4       | 65.5  | 5.2x    |
+| 8       | 131.1 | 10.4x   |
+
+OpenCL **GPU** (Radeon RX 6600 / ROCm): `Mcw/s` vs. launch chunk size.
+The default is now 262144 outer keys per launch.
+
+| Chunk (outer keys) | Mcw/s |
+|--------------------|-------|
+| 4096   (old default) | 187.9 |
+| 65536               | 499.2 |
+| 262144 (default)    | **528.1** |
+
+Larger launches amortize per-enqueue overhead: on discrete AMD GPUs raising
+`AYCWABTU_GPU_CHUNK_SIZE` (or the build default) roughly triples GPU speed.
+
+Background math: a full CW brute force covers 2^32 outer x 2^16 inner =
+**2^48** candidates (bytes 3 and 7 are derived checksums). At 528.1 Mcw/s
+that is ~6.2 days worst case / ~3.1 days average per control word.
+
+ROCm build:
+```
+make WITH_OPENCL=1
+./aycwabtu -g -t test/Testfile_CW_7FFAE9A02486.ts -a 7FFAE9A00000
+```
+
 to do list
 ----------
 * pin the search thread(s) to a specific core (CPU affinity)
@@ -57,7 +89,7 @@ recent updates
 
 recent updates (2026-07)
 ------------------------
-* **OpenCL / GPU support** — bit sliced brute force offloaded to the GPU via OpenCL (kernel in `src/aycwabtu.cl`, `-g` flag). Single-result, ~85.9 Mcw/s on an Apple M2 Pro vs ~68 Mcw/s for 8 CPU threads
+* **OpenCL / GPU support** — bit sliced brute force offloaded to the GPU via OpenCL (kernel in `src/aycwabtu.cl`, `-g` flag). ~86 Mcw/s on an Apple M2 Pro; **~528 Mcw/s on an AMD Radeon RX 6600 (ROCm)**. Default GPU launch chunk raised to 262144 outer keys (was 4096) — larger launches cut per-enqueue overhead ~3x on discrete AMD GPUs (older Apple hardware stays at its 64 group cap). ROCm/AMD platform is auto-selected when multiple OpenCL platforms are present. Override chunk size at runtime with `AYCWABTU_GPU_CHUNK_SIZE`.
 * **NEON SIMD support** — ARM64 128-bit SIMD via NEON intrinsics, 2.7x faster single-thread throughput on Apple Silicon
 * **Multi-threading** — `-p <n>` flag for parallel brute force across n threads with near-linear scaling
 * **C++17 conversion** — rewritten main in C++17 with Settings struct, exception-based error handling, `std::string_view` argument parsing, `std::thread` parallelism, `std::atomic` coordination

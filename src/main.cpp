@@ -719,11 +719,14 @@ static void bruteForceGPU(const Settings& settings,
     uint8_t probe[48];
     memcpy(probe, probedata, 48);
 
-    /* Search in chunks to avoid GPU timeout and allow progress reporting.
-       Each work-item tests 65536 inner keys, so chunkSize outer keys
-       means chunkSize work-items.  At ~13 Mcw/s, 4096 outer keys takes
-       about 20 seconds per chunk — safe from GPU timeouts. */
-    uint32_t chunkSize = 4096;  /* outer keys per GPU launch */
+    /* Search in chunks to allow progress reporting while amortizing per-
+       launch overhead (larger launches are significantly faster on discrete
+       GPUs; the full sweep on an RX 6600 rises ~187 -> ~528 Mcw/s).  All
+       liberal AMD/NVIDIA/CPU platforms are exempt from the Apple dispatch
+       cap, so a 262144-key launch is safe here.  Each work-item tests 65536
+       inner keys, so chunkSize outer keys means chunkSize work-items.
+       Override with AYCWABTU_GPU_CHUNK_SIZE. */
+    uint32_t chunkSize = 262144;  /* outer keys per GPU launch */
     char* env_chunk = std::getenv("AYCWABTU_GPU_CHUNK_SIZE");
     if (env_chunk && env_chunk[0]) {
         chunkSize = (uint32_t)std::atoi(env_chunk);
