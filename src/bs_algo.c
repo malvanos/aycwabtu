@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "config.h"
+#include "bs_rename.h"
 #include "bs_algo.h"
 
 #ifdef SELFTEST
