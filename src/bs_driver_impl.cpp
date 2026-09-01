@@ -556,7 +556,7 @@ static void selfTestImpl() {
             exit(ERR_FATAL);
         }
     }
-    cout << "[1a/2b] key transpose round-trip: PASSED\n";
+    cout << "[1a] key transpose round-trip: PASSED\n";
 
     /* stream decrypt (24 bits -> DB0[0..2], as used by the PES check) */
     aycw_stream_decrypt(&bs_data_ib0[64], 24, keys_bs, bs_data_sb0);
@@ -601,7 +601,7 @@ static void selfTestImpl() {
             exit(ERR_FATAL);
         }
     }
-    cout << "[1b/2b] bit-sliced decrypt vs libdvbcsa (";
+    cout << "[1b] bit-sliced decrypt vs libdvbcsa (";
     cout << BS_BATCH_SIZE << " keys): PASSED\n";
 
     /* ---------- Test 2: end-to-end known-key brute force ---------- */
@@ -640,8 +640,12 @@ extern "C" void ayc_bruteForceRange(uint32_t keyStart, uint32_t keyStop,
                                     const unsigned char probedata[3][16],
                                     bool isBenchmark) {
     atomic<int> keyFound{0};
+    /* tid = -1 marks the real single-threaded search: it writes the resume
+       file as plain "resume" (matching the reader in main.cpp) and uses the
+       clean (no [T0]) progress format.  On a find the core exit()s, so the
+       keyFound value is irrelevant here. */
     bruteForceRangeImpl(keyStart, keyStop, probedata,
-                        isBenchmark, /*tid=*/0, /*nThreads=*/1,
+                        isBenchmark, /*tid=*/-1, /*nThreads=*/1,
                         keyFound, /*shared=*/nullptr);
 }
 

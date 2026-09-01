@@ -363,7 +363,13 @@ static void bruteForceGPU(const Settings& settings,
     uint32_t chunkSize = 262144;  /* outer keys per GPU launch */
     char* env_chunk = std::getenv("AYCWABTU_GPU_CHUNK_SIZE");
     if (env_chunk && env_chunk[0]) {
-        chunkSize = (uint32_t)std::atoi(env_chunk);
+        long cs = std::atol(env_chunk);
+        if (cs < 1) {
+            cerr << "Error: AYCWABTU_GPU_CHUNK_SIZE must be a positive number"
+                 << endl;
+            exit(ERR_USAGE);
+        }
+        chunkSize = (uint32_t)cs;
     }
     uint32_t keyStart = settings.keystart;
     uint32_t keyStop  = settings.keystop;
@@ -372,23 +378,31 @@ static void bruteForceGPU(const Settings& settings,
     cout << "Chunk size: " << chunkSize << " outer keys per launch" << endl;
 
     uint64_t startTime = getTicksMs();
-    uint32_t outerKeysDone = 0;
-    uint32_t totalOuterKeys = keyStop - keyStart + 1;
+    uint64_t outerKeysDone = 0;
+    uint64_t totalOuterKeys = (uint64_t)keyStop - keyStart + 1;
 
-    for (uint32_t chunkStart = keyStart; chunkStart <= keyStop; chunkStart += chunkSize) {
-        uint32_t count = min(chunkSize, keyStop - chunkStart + 1);
+    /* 64-bit cursor so the loop ALWAYS terminates even when keyStop is
+       near 0xFFFFFFFF: a 32-bit `chunkStart += chunkSize` would wrap past
+       the end and re-scan from the beginning forever. */
+    for (uint64_t cur = keyStart; cur <= (uint64_t)keyStop; ) {
+        uint32_t chunkStart = (uint32_t)cur;
+        uint32_t remaining  = (uint32_t)((uint64_t)keyStop - cur + 1);
+        uint32_t count = chunkSize < remaining ? chunkSize : remaining;
 
         uint8_t cw_out[8] = {0};
         bool found = ocl_search(ocl, probe, chunkStart, count,
                                 0, 65536, cw_out);
 
         outerKeysDone += count;
+        cur += count;
 
         /* Progress report */
         uint64_t now = getTicksMs();
         float elapsed = (now - startTime) / 1000.0f;
-        float mcwPerSec = (outerKeysDone * 65536.0f) / elapsed / 1e6f;
-        float pctDone = (outerKeysDone * 100.0f) / totalOuterKeys;
+        float mcwPerSec = elapsed > 0.0f
+            ? (outerKeysDone * 65536.0f) / elapsed / 1e6f : 0.0f;
+        float pctDone = totalOuterKeys
+            ? (outerKeysDone * 100.0f) / totalOuterKeys : 0.0f;
 
         printf("\rGPU: %.1f%% done, %.1f Mcw/s, key %08X .. ",
                pctDone, mcwPerSec, chunkStart + count);

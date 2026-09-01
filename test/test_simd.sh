@@ -53,6 +53,7 @@ expect_failure_msg() { # $1=description, $2=pattern, rest = command
 
 cleanup() { rm -f keyfound resume resume-*; }
 trap cleanup EXIT
+cleanup   # also at start: a stale resume file from a prior run would perturb the e2e searches
 
 echo "== SIMD backend unit tests =="
 echo

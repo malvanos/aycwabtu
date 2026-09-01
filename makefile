@@ -8,6 +8,12 @@ LD          = g++
 
 SHELL=bash
 
+# find a `timeout` command (GNU coreutils on Linux, `gtimeout` on macOS via
+# `brew install coreutils`).  Empty -> run with no time limit on systems
+# without it.  Resolves the old /usr/bin/timeout assumption that broke
+# `make check` on macOS.
+TIMEOUT := $(shell command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null)
+
 # SIMD backend selection is now a RUN-TIME property: every backend the host
 # architecture can compile is linked into one binary (x86_64: scalar+sse2+
 # avx2, ARM64: scalar+neon) and chosen at start-up by CPU auto-detection
@@ -217,10 +223,11 @@ test: aycwabtu
 	cd test && ./test_simd.sh
 
 check: aycwabtu tsgen always
-# just 'timeout' will let windows find C:\Windows\System32\timeout.exe first :(
-	/usr/bin/timeout 5 ./aycwabtu -t test/Testfile_CW_7FFAE9A02486.ts -a 7FFAE9A00000
+#	run the bundled end-to-end + SIMD unit tests + the legacy test frame.
+#	$$(TIMEOUT) is empty on systems without coreutils (runs unbounded).
+	$(if $(TIMEOUT),$(TIMEOUT) 5) ./aycwabtu -t test/Testfile_CW_7FFAE9A02486.ts -a 7FFAE9A00000
 	cd test && ./test_simd.sh
-	cd test && /usr/bin/timeout 60 ./testframe.sh
+	cd test && $(if $(TIMEOUT),$(TIMEOUT) 60) ./testframe.sh
 
 always:
 
