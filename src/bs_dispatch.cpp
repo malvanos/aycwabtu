@@ -10,6 +10,10 @@
    Clang on x86), which also takes OS support (XSAVE/AVX state) into
    account.  On ARM64 the NEON backend is always valid because AArch64
    requires Advanced SIMD.
+
+   NOTE: __builtin_cpu_supports() only accepts a string LITERAL, so the
+   feature name cannot be passed through a helper function parameter.
+   See the AYCW_CPU_HAS() macro below.
 */
 
 #include <cstdio>
@@ -39,16 +43,20 @@ AYCW_BS_DECL_DRIVER(neon)
 
 /* --------------------------------------------------------------------------
    CPU feature detection
+
+   The feature name has to stay a literal at the call site: GCC rejects a
+   `const char*` parameter with "parameter to builtin must be a string
+   constant or literal" and Clang with "expression is not a string literal",
+   so a generic cpuHas(const char*) helper does not compile.  A macro keeps
+   the literal where the builtin is expanded.  On non-x86 targets the whole
+   test folds to false (the x86 backends are not built there anyway).
    -------------------------------------------------------------------------- */
-static bool cpuHas(const char* feature) {
 #if defined(__x86_64__) || defined(__i386__)
-    __builtin_cpu_init();
-    return __builtin_cpu_supports(feature) != 0;
+#define AYCW_CPU_HAS(feat) \
+    (__builtin_cpu_init(), __builtin_cpu_supports(feat) != 0)
 #else
-    (void)feature;
-    return false;
+#define AYCW_CPU_HAS(feat) (false)
 #endif
-}
 
 static bool cpuHasNeon(void) {
 #if defined(__aarch64__) || defined(__ARM_NEON) || defined(_M_ARM64)
@@ -135,14 +143,18 @@ void bs_detect_cpu(void) {
     for (int i = 0; i < BSIMD__COUNT; i++) {
         switch (g_drivers[i].id) {
         case BSIMD_SCALAR: g_drivers[i].supported = true; break;
-        case BSIMD_SSE2:   g_drivers[i].supported = cpuHas("sse2"); break;
+        case BSIMD_SSE2:   g_drivers[i].supported =
+                               AYCW_CPU_HAS("sse2"); break;
         case BSIMD_AVX2:   g_drivers[i].supported =
-                               cpuHas("avx") && cpuHas("avx2"); break;
+                               AYCW_CPU_HAS("avx") &&
+                               AYCW_CPU_HAS("avx2"); break;
         case BSIMD_NEON:   g_drivers[i].supported = cpuHasNeon(); break;
         default:           g_drivers[i].supported = false; break;
         }
     }
 }
+
+#undef AYCW_CPU_HAS
 
 const BSDriver* bs_drivers(int* count) {
     if (count) *count = BSIMD__COUNT;
