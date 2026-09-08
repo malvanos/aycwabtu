@@ -105,7 +105,7 @@ static inline __m128i BS_SHR(__m128i v, int n)
 
 #else
 
-#define BS_EXTRACT32(a,n)  BS_EXTLS32(BS_SHR8(c, (n*4)))
+#define BS_EXTRACT32(a,n)  BS_EXTLS32(BS_SHR8(a, (n*4)))
 #define CHECK_ZERO(a) (_mm_movemask_epi8(_mm_cmpeq_epi32((a),_mm_setzero_si128())) == 0xFFFF)
 
 #endif

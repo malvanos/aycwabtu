@@ -32,6 +32,7 @@ struct Settings {
         , keystart(0)
         , keystop(0xFFFFFFFF)
         , numThreads(1)
+        , keystartSpecified(false)
     {}
 
     bool     benchmark;
@@ -42,6 +43,7 @@ struct Settings {
     uint32_t keystart;
     uint32_t keystop;
     int      numThreads;
+    bool     keystartSpecified; /* true when -a was given on the CLI */
 };
 
 /* --------------------------------------------------------------------------
@@ -58,16 +60,20 @@ static uint64_t getTicksMs() {
 static void bfReadResumeFile(uint32_t *key) {
     FILE *f = fopen(RESUMEFILENAME, "rb");
     if (f) {
-        char buf[8 * 3 + 2 + 1];
+        char buf[64] = {0};
         unsigned char tmp[8 + 3];
         fseek(f, 0, SEEK_SET);
-        fread(buf, sizeof(buf), 1, f);
+        size_t n = fread(buf, 1, sizeof(buf) - 1, f);
         fclose(f);
-        if (8 == sscanf(buf, "%02hhX %02hhX %02hhX %02hhX %02hhX %02hhX %02hhX %02hhX\n",
-                        &tmp[0], &tmp[1], &tmp[2], &tmp[3],
-                        &tmp[4], &tmp[5], &tmp[6], &tmp[7])) {
-            *key = tmp[0] << 24 | tmp[1] << 16 | tmp[2] << 8 | tmp[4];
-            printf("resuming at key %08X\n", *key);
+        if (n > 0) {
+            buf[n] = '\0';
+            if (8 == sscanf(buf, "%02hhX %02hhX %02hhX %02hhX %02hhX %02hhX %02hhX %02hhX\n",
+                            &tmp[0], &tmp[1], &tmp[2], &tmp[3],
+                            &tmp[4], &tmp[5], &tmp[6], &tmp[7])) {
+                *key = (uint32_t)tmp[0] << 24 | (uint32_t)tmp[1] << 16
+                      | (uint32_t)tmp[2] << 8 | (uint32_t)tmp[4];
+                printf("resuming at key %08X\n", *key);
+            }
         }
     }
 }
@@ -117,7 +123,8 @@ static uint32_t scan_cw_param(const char *s) {
                      &tmp[0], &tmp[1], &tmp[2], &tmp[4], &tmp[5], &tmp[6]))) {
         throw runtime_error("Key parameter format incorrect. 6 hex bytes expected.");
     }
-    return tmp[0] << 24 | tmp[1] << 16 | tmp[2] << 8 | tmp[4];
+    return (uint32_t)tmp[0] << 24 | (uint32_t)tmp[1] << 16
+         | (uint32_t)tmp[2] << 8 | (uint32_t)tmp[4];
 }
 
 static Settings parse(int argc, char *argv[]) {
@@ -136,6 +143,7 @@ static Settings parse(int argc, char *argv[]) {
             it++;
             if (it == args.end()) throw runtime_error("Missing argument for -a");
             settings.keystart = scan_cw_param(string(*it).c_str());
+            settings.keystartSpecified = true;
             continue;
         }
 
@@ -386,8 +394,8 @@ static void bruteForceGPU(const Settings& settings,
        the end and re-scan from the beginning forever. */
     for (uint64_t cur = keyStart; cur <= (uint64_t)keyStop; ) {
         uint32_t chunkStart = (uint32_t)cur;
-        uint32_t remaining  = (uint32_t)((uint64_t)keyStop - cur + 1);
-        uint32_t count = chunkSize < remaining ? chunkSize : remaining;
+        uint64_t remaining  = (uint64_t)keyStop - cur + 1;
+        uint32_t count = (remaining < (uint64_t)chunkSize) ? (uint32_t)remaining : chunkSize;
 
         uint8_t cw_out[8] = {0};
         bool found = ocl_search(ocl, probe, chunkStart, count,
@@ -466,8 +474,9 @@ int main(int argc, char *argv[]) {
         return EXIT_SUCCESS;
     }
 
-    /* Read resume file for non-benchmark runs (single-threaded only) */
-    if (!settings.benchmark && settings.numThreads == 1) {
+    /* Read resume file for non-benchmark runs (single-threaded only), unless
+       the user already supplied -a explicitly (CLI wins over resume). */
+    if (!settings.benchmark && settings.numThreads == 1 && !settings.keystartSpecified) {
         bfReadResumeFile(&settings.keystart);
     }
 

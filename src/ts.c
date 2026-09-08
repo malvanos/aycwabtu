@@ -130,7 +130,7 @@ unsigned char ayc_read_ts(const char *tsfile, unsigned char *probedata)
       }
    }
 
-   printf("searching for encrypted packets...\n", tsfile);
+   printf("searching for encrypted packets...\n");
    while (fread(buf, sizeof(buf), 1, fptsfile) && probecount < 3)
    {
       data = ayc_read_packet(buf, &pid, &crypted, &parity, &pusi);
@@ -145,7 +145,7 @@ unsigned char ayc_read_ts(const char *tsfile, unsigned char *probedata)
                {
                   if ((lockpid != 0 && lockpid != pid)) 
                   {
-                     msgDbg(2, "looking for pid %d but this packet has pid &d\n", lockpid, pid);
+                     msgDbg(2, "looking for pid %d but this packet has pid %d\n", lockpid, pid);
                      // keep on searching...
                      continue;   // waiting for our pid...
                   }
@@ -223,7 +223,7 @@ unsigned char ayc_read_ts(const char *tsfile, unsigned char *probedata)
       {
          if (strlen(tsfile) < sizeof(probetsfilename) - strlen(append))
          {
-            memcpy(probetsfilename, tsfile, strlen(tsfile));
+            snprintf(probetsfilename, sizeof(probetsfilename), "%s", tsfile);
             char *tmp = strrchr(probetsfilename, '.');
             if (tmp)
             {

@@ -71,6 +71,7 @@ struct BFState {
     uint64_t totalticks   = 0;
     int      totalloops   = 0;
     int      divider      = 0;
+    int      resumeDivider = 10;
     bool     benchmark;
 };
 
@@ -168,10 +169,9 @@ static void bfPerfAggregate(BFShared& sh, int nThreads, const BFState& st) {
    Resume file
    -------------------------------------------------------------------------- */
 static void bfWriteResumeFile(BFState& st, int tid) {
-    static int divider = 10;
-    divider++;
-    divider &= 0x1ff;
-    if (!divider) {
+    st.resumeDivider++;
+    st.resumeDivider &= 0x1ff;
+    if (!st.resumeDivider) {
         char fname[64];
         if (tid >= 0)
             snprintf(fname, sizeof(fname), "%s-%d", RESUMEFILENAME, tid);
@@ -311,7 +311,10 @@ static void bruteForceRangeImpl(uint32_t keyStart, uint32_t keyStop,
                         memcpy(&data, &probedata[0], 16);
                         dvbcsa_decrypt(&key, data, 16);
                         if (data[0] != 0x00 || data[1] != 0x00 || data[2] != 0x01) {
-                            printf("\n[T%d] Fatal error: candidate verification failed!\n", tid);
+                            if (tid >= 0)
+                                printf("\n[T%d] Fatal error: candidate verification failed!\n", tid);
+                            else
+                                printf("\nFatal error: candidate verification failed!\n");
                             printf("last key was: %02X %02X %02X [%02X]  %02X %02X %02X [%02X]\n",
                                    cw[0], cw[1], cw[2], cw[3],
                                    cw[4], cw[5], cw[6], cw[7]);
@@ -329,7 +332,10 @@ static void bruteForceRangeImpl(uint32_t keyStart, uint32_t keyStop,
                                 /* Claim the find — only first thread wins */
                                 int expected = 0;
                                 if (keyFound.compare_exchange_strong(expected, tid + 1)) {
-                                    printf("\n[T%d] key candidate successfully decrypted three packets\n", tid);
+                                    if (tid >= 0)
+                                        printf("\n[T%d] key candidate successfully decrypted three packets\n", tid);
+                                    else
+                                        printf("\nkey candidate successfully decrypted three packets\n");
                                     printf("KEY FOUND!!!    %02X %02X %02X [%02X]  %02X %02X %02X [%02X]\n",
                                            cw[0], cw[1], cw[2], cw[3],
                                            cw[4], cw[5], cw[6], cw[7]);
@@ -361,6 +367,9 @@ static void bruteForceRangeImpl(uint32_t keyStart, uint32_t keyStop,
 
         if (!st.benchmark) bfWriteResumeFile(st, tid);
 
+        if (st.currentkey32 == st.stopkey32) {
+            break;
+        }
         st.currentkey32++;
     }
 
@@ -376,8 +385,12 @@ static void bruteForceRangeImpl(uint32_t keyStart, uint32_t keyStop,
 static void bruteForceParallelImpl(uint32_t keystart, uint32_t keystop,
                                    int nThreads, bool isBenchmark,
                                    unsigned char probedata[3][16]) {
-    const uint32_t range = keystop - keystart;
-    const uint32_t chunk = range / nThreads;
+    const uint64_t totalKeys = (uint64_t)keystop - keystart + 1;
+    if (totalKeys < (uint64_t)nThreads) {
+        nThreads = (int)totalKeys;
+    }
+    const uint32_t chunk = (uint32_t)(totalKeys / nThreads);
+    const uint32_t remainder = (uint32_t)(totalKeys % nThreads);
 
     printf("Splitting key space across %d threads (chunk size: %u per thread)\n",
            nThreads, chunk);
@@ -387,17 +400,28 @@ static void bruteForceParallelImpl(uint32_t keystart, uint32_t keystop,
     vector<thread> threads;
     threads.reserve(nThreads - 1);
 
+    /* Each thread takes `chunk` keys; the first `remainder` threads take one
+       extra so every slice is non-empty and non-overlapping.  Thread 0 keeps
+       the first slice (matching the pre-existing layout and start-key banner). */
+    auto sliceSize = [&](int t) -> uint32_t {
+        return chunk + ((uint32_t)t < remainder ? 1u : 0u);
+    };
+
+    uint32_t offset = keystart;
+    uint32_t start0 = offset;
+    uint32_t stop0  = start0 + sliceSize(0) - 1;
+    offset = stop0 + 1;
+
     for (int t = 1; t < nThreads; t++) {
-        uint32_t start = keystart + t * chunk;
-        uint32_t stop  = (t == nThreads - 1) ? keystop : (start + chunk - 1);
+        uint32_t start = offset;
+        uint32_t stop  = start + sliceSize(t) - 1;
+        offset = stop + 1;
         threads.emplace_back(bruteForceRangeImpl, start, stop,
                              probedata, isBenchmark,
                              t, nThreads, ref(keyFound), &shared);
     }
 
     /* Thread 0 runs in the main thread */
-    uint32_t start0 = keystart;
-    uint32_t stop0  = (nThreads == 1) ? keystop : (start0 + chunk - 1);
     bruteForceRangeImpl(start0, stop0, probedata, isBenchmark,
                         0, nThreads, keyFound, &shared);
 
