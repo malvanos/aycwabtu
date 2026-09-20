@@ -12,6 +12,7 @@ It uses parallel bit slice technique. Other csa parallel bit slice implementatio
 features
 --------
 * fast brute force key calculation due to bit sliced crack algorithm (AVX2, SSE2, NEON, and 32-bit scalar CPU versions available)
+* **run-time SIMD auto-detection** — every backend the architecture can compile is linked into one binary and the best one is picked at start-up (`-S auto`, default), or selected manually with `-S sse2|avx2|neon|scalar`. `-S list` shows what is available
 * **OpenCL / GPU support** — `-g` flag offloads the brute force to the GPU via an OpenCL kernel (`src/aycwabtu.cl`)
 * **multi-threaded** — `-p <n>` splits the key space across n parallel threads (near-linear scaling)
 * **self-test** — `-s` verifies the algorithm against known vectors and a known-key
@@ -78,14 +79,14 @@ to do list
 ----------
 * pin the search thread(s) to a specific core (CPU affinity)
 * auto-set the number of threads from the number of available cores (fall back to a sensible default)
-* auto-detect the CPU at run time and pick the best SIMD instruction set (AVX2/SSE2/NEON/scalar) instead of a build-time flag
 * optimize the block sbox boolean equations. Only slightly faster with 128 bits. See da_diett.pdf Chpt. 3.1
 * Ctrl-C handling on linux/windows
 * block decrypt first (does not depend on stream). Then stream afterwards, stop XORing immediately if foreseeable there is no PES header
 
 recent updates
 --------------
-* **AVX2 SIMD support** — 256-bit parallel mode on x86_64 (`SIMD=avx2`, `PARALLEL_256_AVX2`, batch of 256 keys/register). ~23.6 Mcw/s single-thread vs ~12.8 Mcw/s for SSE2 (~1.8×), selectable in the makefile alongside SSE2/NEON/scalar
+* **Run-time SIMD auto-detection** — the SIMD backend is no longer a build-time choice. One binary contains every backend the host architecture can compile (x86_64: scalar+sse2+avx2, ARM64: scalar+neon); at start-up the CPU is detected and the best supported backend is selected (`-S auto`, the default). Manual selection with `-S <backend>`, `-S list` prints the availability table. `-s` runs the algorithm self-test for every available backend; `make test` runs the full SIMD unit-test suite (`test/test_simd.sh`: auto + per-backend self-tests, per-backend end-to-end key finds, negative tests for unknown/unavailable backends)
+* **AVX2 SIMD support** — 256-bit parallel mode on x86_64 (`PARALLEL_256_AVX2`, batch of 256 keys/register). ~23.6 Mcw/s single-thread vs ~12.8 Mcw/s for SSE2 (~1.8×), selectable at run time with `-S avx2`
 
 recent updates (2026-07)
 ------------------------
@@ -93,14 +94,14 @@ recent updates (2026-07)
 * **NEON SIMD support** — ARM64 128-bit SIMD via NEON intrinsics, 2.7x faster single-thread throughput on Apple Silicon
 * **Multi-threading** — `-p <n>` flag for parallel brute force across n threads with near-linear scaling
 * **C++17 conversion** — rewritten main in C++17 with Settings struct, exception-based error handling, `std::string_view` argument parsing, `std::thread` parallelism, `std::atomic` coordination
-* **Compiler optimizations** — `-flto -march=native` for +9% single-thread throughput
+* **Compiler optimizations** — `-flto` for +9% single-thread throughput (per-backend SIMD flags only; no global `-march=native` so the binary runs on any CPU of that family)
 * **Algorithmic improvements** — stream decrypt reduced from 25 to 24 bits (only 3 bytes needed for PES check), `std::memcpy` for block init copy
 * **C++17 compatibility fixes** — removed `register` keywords, added explicit casts, fixed const-correctness throughout
-* **Build system** — platform detection (SSE on x86_64, NEON on ARM64, scalar fallback), C++17 standard, LTO
+* **Build system** — platform detection decoupled from SIMD choice: all compilable backends are built (per-backend `obj/<backend>/` objects with `-DPARALLEL_MODE=<n>` + backend flags and symbol renaming via `src/bs_rename.h`), linked into one binary, selected at run time by `src/bs_dispatch.cpp`; C++17 standard, LTO
 
 developers
 ----------
-* after changing the code, run tests with SELFTEST enabled to make sure the algorithm still works. It's too easy to break things.
+* after changing the code, run `make test` (SIMD unit tests + self-tests) and `make check` to make sure the algorithm still works. It's too easy to break things.
 * run "make check"
 * test all the batch size implementations
 * share your benchmark values in the pull request

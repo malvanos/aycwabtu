@@ -1,4 +1,5 @@
 #include "config.h"
+#include "bs_rename.h"
 
 #if PARALLEL_MODE == PARALLEL_256_AVX2
 

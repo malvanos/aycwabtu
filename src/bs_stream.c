@@ -1,4 +1,5 @@
 #include "config.h"
+#include "bs_rename.h"
 #include "bs_stream.h"
 
 

@@ -1,4 +1,5 @@
 #include "ocl.hpp"
+#include "config.h"
 
 #ifdef HAVE_OPENCL
 
@@ -144,7 +145,19 @@ bool ocl_init(OclContext& ocl, const char* kernel_source) {
     bool is_apple = is_apple_platform(platform_name);
     char* env_cap = std::getenv("AYCWABTU_OCL_NGROUPS_CAP");
     if (env_cap && env_cap[0]) {
-        ngroups_cap = (uint32_t)std::atoi(env_cap);  /* explicit override */
+        char* end = nullptr;
+        long cap = std::strtol(env_cap, &end, 10);
+        if (end == env_cap || *end != '\0' || cap < 1) {
+            std::cerr << "Error: AYCWABTU_OCL_NGROUPS_CAP must be a positive integer (got \""
+                      << env_cap << "\")" << std::endl;
+            exit(ERR_USAGE);
+        }
+        if ((uint64_t)cap * 128 > 0xFFFFFFFFULL) {
+            std::cerr << "Error: AYCWABTU_OCL_NGROUPS_CAP is too large (max "
+                      << (0xFFFFFFFFULL / 128) << " threadgroups)" << std::endl;
+            exit(ERR_USAGE);
+        }
+        ngroups_cap = (uint32_t)cap;  /* explicit override */
         std::cout << "OpenCL: threadgroup cap overridden to " << ngroups_cap << " via env" << std::endl;
     } else if (is_apple) {
         std::cout << "OpenCL: Apple cl2Metal - sub-dispatch capped at 64 threadgroups" << std::endl;
@@ -258,8 +271,8 @@ bool ocl_search(OclContext& ocl,
 
     clSetKernelArg(ocl.kernel, 0, sizeof(cl_mem), &buf_probe);
     clSetKernelArg(ocl.kernel, 1, sizeof(cl_mem), &buf_found);
-    clSetKernelArg(ocl.kernel, 3, sizeof(uint32_t), &inner_start);
-    clSetKernelArg(ocl.kernel, 4, sizeof(uint32_t), &inner_count);
+    clSetKernelArg(ocl.kernel, 4, sizeof(uint32_t), &inner_start);
+    clSetKernelArg(ocl.kernel, 5, sizeof(uint32_t), &inner_count);
 
     /* Each sub-dispatch runs EXACTLY ONCE (no retry).  The 64-group cap keeps
        the geometry clean, and CPU verification below rejects any fabricated
@@ -279,6 +292,7 @@ bool ocl_search(OclContext& ocl,
         size_t global_size = ((chunk + wg_size - 1) / wg_size) * wg_size;
 
         clSetKernelArg(ocl.kernel, 2, sizeof(uint32_t), &chunk_start);
+        clSetKernelArg(ocl.kernel, 3, sizeof(uint32_t), &chunk);
 
         err = clEnqueueNDRangeKernel(ocl.queue, ocl.kernel, 1, nullptr,
                                      &global_size, &wg_size, 0, nullptr, nullptr);

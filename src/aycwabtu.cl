@@ -1063,14 +1063,18 @@ __kernel void aycwabtu_search(
     __global const u8  *probedata,   /* 3 x 16 bytes of encrypted TS      */
     __global volatile u32 *found,    /* output: [flag, cw_hi, cw_lo]       */
     u32 key_start,                   /* start of outer 32-bit key range    */
+    u32 key_count,                   /* number of outer keys in this launch */
     u32 inner_start,                 /* start of inner key loop            */
     u32 inner_count)                 /* number of inner keys to test       */
 {
     u32 gid = get_global_id(0);
-    u32 outer_key = key_start + gid;
 
-    /* Quick bounds check and early-exit check */
-    if (found[0] != 0) return;
+    /* global_size is rounded up to a multiple of wg_size, so trailing
+       work-items may exceed the requested outer-key range.  Skip them, and
+       also exit early once another work-item has already claimed the key. */
+    if (gid >= key_count || found[0] != 0) return;
+
+    u32 outer_key = key_start + gid;
 
     /* Work buffers (private memory) */
     u8 cw[8], cws[8], kk[56];
