@@ -1,12 +1,16 @@
 # OpenCL GPU Implementation Plan
 
-## Status: Hybrid optimization in progress (2026-08-20) — 129 Mcw/s after Phase A1+A2
+## Status: Phase 2 in progress (code-verified 2026-10-11) — 129 Mcw/s after Phase A1+A2+A5
 
 The OpenCL implementation is fully integrated and correct.
 - Phase 1 (CSA algorithm port): ✅ Complete
-- Phase 2 (Performance optimizations): 🔄 Phase A1+A2 merged (95 → 129 Mcw/s); A3 skipped
-- Phase 3 (Integration into main.cpp): ✅ Complete
+- Phase 2 (Performance optimizations): 🔄 A1+A2+A5 done (95 → 129 Mcw/s); A3 skipped; A4, A6-A8 + Phase B remain
+- Phase 3 (Integration into main.cpp): ✅ Complete (resume file for GPU deferred)
+- Phase 4 (Productionize): ❌ Not started
 - Bug fix (threadgroup-count corruption): ✅ Complete (2026-08-18)
+- Bug fixes (PLAN2 — 12 bugs): ✅ Complete (commit `e873011`)
+- Hybrid CPU+GPU mode: ✅ Complete (2026-10-11, beyond original plan)
+- Host pipelining (A5): ✅ Complete (2026-10-11)
 
 GPU search runs at **129.2 Mcw/s** on Apple M2 Pro (up from 95.1 baseline).
 Target: portable performance on **any OpenCL machine** (Apple/NVIDIA/AMD/Intel GPU,
@@ -43,15 +47,65 @@ kernel above ~72 threadgroups silently corrupts work-item state**.  Evidence:
 - Verified: the previously-corrupting 16384-item geometry now finds and
   CPU-verifies the real key `7F FA E9 62 A0 24 86 4A`.
 
+## ✅ Bug Fixes: PLAN2 (all 12 fixed, commit `e873011`)
+
+Root-cause analysis and fixes for bugs found during the `auto-detect` branch
+review.  All fixed and verified.
+
+### Category A: auto-detect branch & search loop fixes
+
+| # | Bug | File | Fix |
+|---|-----|------|-----|
+| 1 | GPU search 32-bit truncation → infinite spin at `keyStop=0xFFFFFFFF` | `src/hybrid.cpp` | Use `uint64_t remaining` instead of casting to `uint32_t` |
+| 2 | CPU search infinite wrap at end-of-keyspace (`0xFFFFFFFF+1` wraps to 0) | `src/bs_driver_impl.cpp` | Break when `currentkey32 == stopkey32` before incrementing |
+| 3 | Multi-threaded underflow when `range < nThreads` (thread 0 searches 4B keys) | `src/bs_driver_impl.cpp` | Clamp `nThreads` to `totalKeys`, distribute `chunk` + `remainder` |
+| 4 | Data race on `static int divider` in multi-threaded resume writes | `src/bs_driver_impl.cpp` | Move `resumeDivider` into per-thread `BFState` |
+| 5 | Cosmetic `[T-1]` progress output & 32-bit shift UB | `src/bs_driver_impl.cpp`, `src/main.cpp` | Suppress `[T-1]` in single-threaded; cast shifts to `uint32_t` |
+
+### Category B: resume file & CLI state handling
+
+| # | Bug | File | Fix |
+|---|-----|------|-----|
+| 6 | Resume file silently overwrites user `-a` parameter | `src/main.cpp` | Add `keystartSpecified` flag; skip resume when `-a` given |
+| 7 | `fread` buffer under-read / unterminated stack string in `bfReadResumeFile` | `src/main.cpp` | Use `char buf[64] = {0}`, read with `fread(buf, 1, sizeof(buf)-1, f)`, null-terminate |
+
+### Category C: OpenCL boundary & input validation
+
+| # | Bug | File | Fix |
+|---|-----|------|-----|
+| 8 | Missing GPU work-item bounds check for non-multiple launch sizes | `src/aycwabtu.cl`, `src/ocl.cpp` | Add `key_count` param; early guard `if (gid >= key_count \|\| found[0] != 0) return;` |
+| 9 | `AYCWABTU_OCL_NGROUPS_CAP=0` → infinite loop | `src/ocl.cpp` | Validate `ngroups_cap >= 1`, reject with `exit(ERR_USAGE)` |
+
+### Category D: parser safety & typo fixes
+
+| # | Bug | File | Fix |
+|---|-----|------|-----|
+| 10 | Unterminated string / stack overrun in TS probe output | `src/ts.c` | Use `snprintf` instead of `memcpy` without null-termination |
+| 11 | SSE2 fallback macro typo referencing `c` instead of `a` | `src/bs_sse2.h` | Replace `c` with `(a)` in `BS_EXTRACT32` |
+| 12 | Format string typos (unused var, `&d` instead of `%d`) | `src/ts.c` | Remove unused arg; fix `%d` |
+
+### Additional hybrid-mode bugs fixed (commit `10d8c9d`)
+
+8 bugs in CPU+GPU hybrid mode were found and fixed alongside the hybrid search
+feature: GPU truncation, CPU end-of-keyspace wrap, MT underflow/race, resume/CLI
+handling, OpenCL bounds, and parser typos — all verified by `test/test_cpu_gpu.sh`
+(20/20 pass).
+
 ## Files
 
 | File | Status | Description |
 |------|--------|-------------|
-| `src/aycwabtu.cl` | ✅ done (Phase 1) | OpenCL kernel — exact CSA port, 65536 inner keys/work-item |
-| `src/ocl.hpp` | ✅ done | Host-side header (inner loop params added) |
-| `src/ocl.cpp` | ✅ done | Host implementation (inner loop params added) |
+| `src/aycwabtu.cl` | ✅ done (Phase 1) + A1+A2 | OpenCL kernel — exact CSA port, 65536 inner keys/work-item; trimmed quick-check (3 bytes), fused `block_perm_sbox` |
+| `src/ocl.hpp` | ✅ done + A5+A6 partial | Host-side header; `verifyCw`, platform detection, env overrides, double-buffered `buf_found[2]` |
+| `src/ocl.cpp` | ✅ done + A5+A6 partial | Host implementation; chunking, CPU-verify gate, **A5 pipelining ✅** (non-blocking + look-ahead) |
+| `src/hybrid.cpp` / `src/hybrid.hpp` | ✅ done | Hybrid CPU+GPU search with WorkCoordinator; `-c` flag |
+| `src/main.cpp` | ✅ done (Phase 3) | `-g`, `-c`, `-s`, `-b` flags, GPU/hybrid search with progress |
 | `test_ocl.cpp` | ✅ done | Test program — verifies known key against GPU |
-| main.cpp integration | ✅ done (Phase 3) | `-g` flag, GPU search with chunking and progress |
+| `bench_ocl.cpp` / `ocl_info.cpp` | ✅ done | Standalone benchmark/info tools (no makefile targets — A8) |
+| `tools/aycwabtu_diag.cl` | ✅ done | Differential harness kernel (A4 — not yet re-run) |
+| `tools/fused_tables.py` | ✅ done (A2) | Generates `block_perm_sbox`; `--verify-only` cross-checks |
+| `test/test_cpu_gpu.sh` | ✅ done | Hybrid mode test suite |
+| `test_ocl_dbg.cpp` | ⚠️ stale | Debug file — fix or delete (A8) |
 
 ## Architecture
 
@@ -114,11 +168,17 @@ The kernel's CSA stream and block ciphers have been replaced with exact ports fr
 - Inner loop used u16 causing overflow when inner_count=65536
 - Stream cipher is required for PES check (chain XOR combines stream output with block decrypt output)
 
-### Phase 2: Performance 🔄 IN PROGRESS (2026-08-18)
+### Phase 2: Performance 🔄 IN PROGRESS (code-verified 2026-10-11)
 
 - [x] Tuned chunk size: 4096 outer keys per launch (was 65536 — launch overhead was bottleneck)
 - [x] Work-group size tuned to 128 for M2 GPU
 - [x] Hybrid optimization plan below (approved)
+- [x] Hybrid CPU+GPU mode (`-c` flag) with WorkCoordinator dynamic chunk sharing
+- [x] SIMD runtime auto-detection (`-S` flag)
+- [x] Self-test (`-s`) and benchmark (`-b`) modes for GPU and hybrid
+
+**Code-verified status (2026-10-11)**: A1+A2+A5 done and verified in `src/aycwabtu.cl` + `src/ocl.cpp`.
+A6 partially done (platform detection + env overrides). Remaining: A4, A6 (rest), A7, A8, Phase B (B1–B6).
 
 **Baseline results**: ~13 → **95.1 Mcw/s** (7.3× speedup) by increasing chunk size.
 Still well below what the GPU should deliver; the kernel burns ~470 random
@@ -149,27 +209,37 @@ divergent constant reads serialize on GPUs.
 #### Phase A — incremental (scalar kernel + host), low risk
 
 - **A1** ✅ trim quick-check stream output to 3 bytes (32 → 12 gen rounds/candidate);
-  chain XOR reduced 8 → 3 iterations.
+  chain XOR reduced 8 → 3 iterations. Verified: `quick_check_pes` calls
+  `stream_xor(..., 3)` in `aycwabtu.cl:1023`.
 - **A2** ✅ fuse `block_perm∘block_sbox` into one generated `__constant` table (112 → 56);
   table generated by `tools/fused_tables.py`, index is pre-sbox byte `kk[i]^W[6]`.
+  Verified: `block_perm_sbox[256]` at `aycwabtu.cl:631`, used at `aycwabtu.cl:971`.
 - **A3** ⛔ skipped — `kperm[j][x]` returns a 64-bit word with cross-byte coupling; the
   chain operates on full `u64` words, not per-byte streams. Only ~5/470 lookups (~1%)
   can be hoisted — not worth the complexity.
-- **A4** re-test the 64-threadgroup ceiling with the per-gid differential harness
-  (kernel is much smaller after A1+A2); raise the Apple cap only where provably clean.
+- **A4** ❌ re-test the 64-threadgroup ceiling with the per-gid differential harness
+  (`tools/aycwabtu_diag.cl` exists but has not been re-run after A1+A2);
+  raise the Apple cap only where provably clean.
   CPU-verify gate stays regardless.
-- **A5** host pipelining: persistent buffers (created in `ocl_init`), double-buffered
-  `found` + events → next sub-dispatch enqueued while previous readback is in flight;
-  non-blocking reads (removes the zero→kernel→read serialization in `ocl.cpp:150-191`)
-- **A6** device-adaptive geometry: vendor/platform queries; 64-TG cap only on Apple
-  cl2Metal (env override `AYCWABTU_OCL_NGROUPS_CAP`); elsewhere size sub-dispatches to
-  ~1–3 s (TDR-safe) and ≥ several× CU count; add inner-split parameter S
-  (65536 inner = S banks → S× more work-items) for big GPUs; log per-kernel
-  WG size / private memory after build
-- **A7** `main.cpp`: chunk size from device info instead of hardcoded 4096; keep
-  `verifyCw` + retry loop untouched
-- **A8** cleanup: dead `get_kernel_source` decl, duplicate `wg_size` field, stale
-  `test_ocl_dbg.cpp`; add makefile targets for `bench_ocl` / `ocl_info` / `test_ocl*`
+- **A5** ✅ host pipelining: double-buffered `found` (`buf_found[2]`) + non-blocking
+  writes/reads (`CL_FALSE`) + events + look-ahead pipeline (depth 1).  The next
+  sub-dispatch is enqueued while the previous readback is in flight, removing the
+  zero→kernel→read serialization.  Implemented in `ocl.cpp:248-460` (2026-10-11).
+  Verified: GPU search, hybrid search, self-tests, clean-miss all pass.
+- **A6** 🟡 device-adaptive geometry — **partially done**:
+  - ✅ vendor/platform queries in `ocl_init` (`is_apple_platform`)
+  - ✅ 64-TG cap only on Apple/Intel cl2Metal; 4096 elsewhere
+  - ✅ env overrides: `AYCWABTU_OCL_NGROUPS_CAP`, `AYCWABTU_OCL_PLATFORM`
+  - ❌ missing: `AYCWABTU_OCL_LANES` override, inner-split parameter S
+    (65536 inner = S banks → S× more work-items) for big GPUs,
+    per-kernel WG size / private memory logging after build
+- **A7** ❌ `hybrid.cpp`: chunk size from device info instead of hardcoded 262144;
+  keep `verifyCw` + retry loop untouched
+- **A8** ❌ cleanup:
+  - dead `get_kernel_source` decl at `ocl.cpp:13` (declared, never defined/used)
+  - duplicate `wg_size` field: `ocl.hpp:47` (in `OclContext`) and `ocl.cpp:233` (static)
+  - stale `test_ocl_dbg.cpp` still present
+  - no makefile targets for `bench_ocl` / `ocl_info` / `test_ocl*` (built manually)
 
 **Expected vs measured (M2 Pro GPU)**:
 - Baseline (pre-Phase-A scalar): **95.1 Mcw/s** (chunk 4096)
@@ -185,32 +255,35 @@ divergent constant reads serialize on GPUs.
 - chunk 1024: 34.3 Mcw/s
 - chunk 4096: **129.2 Mcw/s** (current sweet spot)
 
-#### Phase B — bitsliced kernel (port of the proven CPU implementation), high impact
+#### Phase B — bitsliced kernel (port of the proven CPU implementation), high impact — ❌ NOT STARTED
 
 The CPU path is already a validated byte/bit-sliced CSA (`src/bs_block.c` +
 `bs_block_ab.c` boolean sbox, `src/bs_stream.c` boolean sboxes + bit-sliced A_BS/B_BS,
 `bs_algo.c` bitsliced increment + PES mask) behind a `dvbcsa_bs_word_t` word-API
 (NEON 128-bit; portable fallback `bs_uint32.c`). **Port, don't re-invent:**
 
-- **B1** new OpenCL word layer (op set of `bs_uint32.c`) with runtime-selectable lane
+- **B1** ❌ new OpenCL word layer (op set of `bs_uint32.c`) with runtime-selectable lane
   widths: 32 (`uint`) / 64 (`ulong`) / 128 (`uint4`) → three kernels from one source
-- **B2** block cipher: 56 rounds boolean-sbox (zero LUTs), byte-sliced 8-word state;
+- **B2** ❌ block cipher: 56 rounds boolean-sbox (zero LUTs), byte-sliced 8-word state;
   key schedule = the 6 bit-permutation word-moves + NOTs recomputed per inner
   iteration (word reorderings, amortized over the lane batch)
-- **B3** stream cipher: 32 init + 12 gen rounds with boolean sboxes — removes the last
+- **B3** ❌ stream cipher: 32 init + 12 gen rounds with boolean sboxes — removes the last
   ~310 per-candidate LUTs
-- **B4** kernel body: 1 outer key/work-item, inner loop = 65536/lanes iterations;
+- **B4** ❌ kernel body: 1 outer key/work-item, inner loop = 65536/lanes iterations;
   PES mask on bitsliced result → nonzero mask = winning lane; extract lane → scalar CW
   → `atomic_cmpxchg` found write → host CPU-verifies as today
-- **B5** register budget ~100–160 words/work-item: 32 lanes ≈ 400–650 B/thread;
+- **B5** ❌ register budget ~100–160 words/work-item: 32 lanes ≈ 400–650 B/thread;
   64 lanes ≈ 0.8–1.3 KB; 128 lanes ≈ 1.6–2.5 KB (CPU devices / wide-reg GPUs).
   Select per device + `AYCWABTU_OCL_LANES` override.
-- **B6** gating: known-key + randomized differential vs CPU libdvbcsa
+- **B6** ❌ gating: known-key + randomized differential vs CPU libdvbcsa
   **before enabling on any device**. If the heavy kernel trips the cl2Metal corruption
   on Apple (harness from A4), disable there and keep the scalar kernel as fallback.
 
 **Expected**: eliminates divergent-LUT serialization entirely → several× over the tuned
 scalar kernel on NVIDIA/AMD-class GPUs; smaller on M2.
+
+**Current kernel state**: `src/aycwabtu.cl` has only the scalar `aycwabtu_search` kernel
+(1119 lines). No bitsliced entry point, no `AYCWABTU_OCL_LANES`, no boolean sboxes.
 
 #### Portability policy
 
@@ -220,29 +293,31 @@ scalar kernel on NVIDIA/AMD-class GPUs; smaller on M2.
 - Windows/Linux desktop GPUs: sub-dispatch runtime cap (watchdog/TDR safety)
 - OpenCL CPU devices: 128-lane kernel (maps to host SIMD width)
 
-#### Verification
+#### Verification (code-verified 2026-10-11)
 
-1. `make && ./aycwabtu -t test/Testfile_CW_7FFAE9A02486.ts -g` → finds
+1. ✅ `make && ./aycwabtu -t test/Testfile_CW_7FFAE9A02486.ts -g` → finds
    `7F FA E9 62 A0 24 86 4A`, CPU-verify passes; also key-at-chunk-boundary + clean-miss ranges
-2. Fused tables cross-checked against on-the-fly composition (`tools/fused_tables.py
-   --verify-only` compares kernel table vs generated) + known-key test
-3. Per-gid differential harness re-run (move `/tmp/aycwabtu_diag.cl` into `tools/`)
-4. Bitsliced kernel: known-key test + randomized differential vs CPU over many
-   random (outer, inner) pairs
-5. `bench_ocl` geometry sweep; record before/after Mcw/s below
-6. `ocl_info` logs per-kernel private memory (no spills) for every geometry shipped
+2. ✅ Fused tables cross-checked: `tools/fused_tables.py --verify-only` compares kernel table vs generated
+3. 🟡 Per-gid differential harness: `tools/aycwabtu_diag.cl` exists (moved from /tmp) but **not re-run after A1+A2** (A4)
+4. ❌ Bitsliced kernel: known-key test + randomized differential vs CPU over many
+   random (outer, inner) pairs (Phase B)
+5. 🟡 `bench_ocl` geometry sweep: tool exists (`bench_ocl.cpp`), no makefile target (A8)
+6. 🟡 `ocl_info` logs per-kernel private memory: tool exists (`ocl_info.cpp`), no makefile target (A6/A8)
 
 #### Files
 
 | File | Change |
 |------|--------|
-| `src/aycwabtu.cl` | A1+A2 done; A4; Phase B kernel (same program, second entry point) |
-| `tools/fused_tables.py` | A2: generates `block_perm_sbox` (fused block cipher table); --verify-only cross-checks the kernel |
-| `tools/aycwabtu_diag.cl` | differential-harness kernel (moved from /tmp) |
-| `src/ocl.cpp` / `src/ocl.hpp` | A5, A6, multi-kernel selection + geometry |
-| `src/main.cpp` | A7 (device-driven chunking, flags) |
-| `makefile` | test/bench targets (A8) |
-| `test_ocl_dbg.cpp` | fix or delete (A8) |
+| `src/aycwabtu.cl` | A1+A2 done ✅; A4; Phase B kernel (same program, second entry point) ❌ |
+| `tools/fused_tables.py` | A2 ✅: generates `block_perm_sbox`; `--verify-only` cross-checks the kernel |
+| `tools/aycwabtu_diag.cl` | A4 ✅: differential-harness kernel (moved from /tmp, not yet re-run) |
+| `src/ocl.cpp` / `src/ocl.hpp` | A5 ✅ (2026-10-11), A6 🟡 (partial), multi-kernel selection + geometry ❌ |
+| `src/hybrid.cpp` | A7 ❌ (device-driven chunking); hybrid mode ✅ done |
+| `src/main.cpp` | A7 ❌; `-g`, `-c`, `-s`, `-b` flags ✅ done |
+| `makefile` | A8 ❌: no targets for `bench_ocl` / `ocl_info` / `test_ocl*` |
+| `test_ocl_dbg.cpp` | A8 ❌: fix or delete (stale) |
+| `bench_ocl.cpp` / `ocl_info.cpp` | ✅ exist as standalone tools (no makefile targets) |
+| `test/test_cpu_gpu.sh` | ✅ hybrid mode test suite |
 
 #### Sequence
 
@@ -250,21 +325,37 @@ A1–A3 + table generator → A4 harness re-run → A5–A7 host rework → re-t
 measure Phase A → B1–B5 port → B6 gating → auto-selection + overrides →
 final bench matrix + docs.
 
-### Phase 3: Integration ✅ COMPLETE (2026-08-18)
+#### Phase 2 — What Remains (code-verified 2026-10-11)
+
+| # | Item | Effort | Impact |
+|---|------|--------|--------|
+| A4 | Re-test 64-TG ceiling with `tools/aycwabtu_diag.cl` after A1+A2 | Low | Unlock larger dispatches on Apple |
+| A5 | ~~Host pipelining~~ ✅ **DONE** (2026-10-11) | — | — |
+| A6 | Complete device-adaptive geometry: `AYCWABTU_OCL_LANES`, inner-split S, per-kernel logging | Medium | Big win on NVIDIA/AMD (uncapped dispatches) |
+| A7 | Device-driven chunk size in `hybrid.cpp` (not hardcoded 262144) | Low | Auto-tune per device |
+| A8 | Cleanup: dead `get_kernel_source` decl, duplicate `wg_size`, stale `test_ocl_dbg.cpp`, makefile targets | Low | Code hygiene |
+| B1–B6 | **Bitsliced kernel** — port CPU bitsliced CSA to OpenCL (boolean sboxes, lane widths 32/64/128) | **High** | **Several× over scalar on NVIDIA/AMD** |
+
+**Recommended order**: A8 (quick cleanup) → A4+A6+A7 (device-adaptive) → B1–B6 (bitsliced kernel, the big win).
+
+### Phase 3: Integration ✅ COMPLETE (2026-10-11, code-verified)
 
 - [x] Add `-g` flag to main.cpp for GPU mode
-- [x] Auto-detect OpenCL availability (falls back with error message)
-- [x] Progress reporting from GPU searches (Mcw/s, percentage)
-- [x] Key verification with CPU decrypt after GPU find (now a hard gate:
-      rejects fabricated GPU winners, see bug-fix section)
-- [ ] Resume file support for GPU mode (deferred)
+- [x] Add `-c`/`--cpu-gpu` flag for hybrid CPU+GPU mode (beyond original plan)
+- [x] Auto-detect OpenCL availability (makefile probe, falls back to CPU-only stubs)
+- [x] Progress reporting from GPU searches (Mcw/s, percentage) — both GPU-only and hybrid
+- [x] Key verification with CPU decrypt after GPU find (hard gate: `verifyCw` in `ocl.hpp`)
+- [x] Self-test mode (`-s`) including GPU and hybrid self-tests
+- [x] Benchmark mode (`-b`) for GPU and hybrid
+- [x] SIMD runtime auto-detection (`-S` flag)
+- [ ] Resume file support for GPU mode (deferred — `bfReadResumeFile` only called for single-threaded CPU)
 
-### Phase 4: Productionize (deferred past per-phase completion)
+### Phase 4: Productionize ❌ NOT STARTED (code-verified 2026-10-11)
 
 - [ ] Multi-GPU support (fan out sub-ranges; OclContext + host thread per device)
-- [ ] OpenCL on Linux (NVIDIA/AMD GPU) — makefile already links `-lOpenCL`; validate
-- [ ] OpenCL on Windows
-- [ ] Error recovery (GPU resets, memory allocation failures)
+- [ ] OpenCL on Linux (NVIDIA/AMD GPU) — makefile has Linux link flags + CI with PoCL; needs real GPU validation
+- [ ] OpenCL on Windows — CI workflow exists; makefile has no Windows-specific OpenCL handling
+- [ ] Error recovery (GPU resets, memory allocation failures) — `ocl.error` stops worker but no recovery
 - [ ] Resume file support for GPU mode
 
 ## Performance (Measured)

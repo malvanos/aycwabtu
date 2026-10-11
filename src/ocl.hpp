@@ -48,9 +48,12 @@ struct OclContext {
     uint32_t         itemsCap = 0; /* per-platform max thread-groups/sub-dispatch */
 
     /* Buffers created lazily on first ocl_search call, reused across calls.
-       Released in ocl_cleanup. */
+       Released in ocl_cleanup.
+       buf_found is double-buffered: [0] and [1] alternate across sub-dispatches
+       so the next kernel can write while the host reads the previous result
+       (A5 host pipelining). */
     cl_mem           buf_probe = nullptr;
-    cl_mem           buf_found = nullptr;
+    cl_mem           buf_found[2] = {nullptr, nullptr};
 
     /* Set to true when any OpenCL API call fails inside ocl_search.
        Callers should check this and stop using the GPU. */
