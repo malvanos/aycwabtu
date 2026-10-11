@@ -14,6 +14,7 @@ features
 * fast brute force key calculation due to bit sliced crack algorithm (AVX2, SSE2, NEON, and 32-bit scalar CPU versions available)
 * **run-time SIMD auto-detection** — every backend the architecture can compile is linked into one binary and the best one is picked at start-up (`-S auto`, default), or selected manually with `-S sse2|avx2|neon|scalar`. `-S list` shows what is available
 * **OpenCL / GPU support** — `-g` flag offloads the brute force to the GPU via an OpenCL kernel (`src/aycwabtu.cl`)
+* **simultaneous CPU + GPU mode** — `-c` or `--cpu-gpu` runs CPU threads and GPU in parallel with dynamic chunk-based work sharing; benchmark (`-b --cpu-gpu`) and self-test (`-s --cpu-gpu`) modes are also supported
 * **multi-threaded** — `-p <n>` splits the key space across n parallel threads (near-linear scaling)
 * **self-test** — `-s` verifies the algorithm against known vectors and a known-key
   brute force, then exits (returns 0 on success, 16 on failure — CI-friendly)

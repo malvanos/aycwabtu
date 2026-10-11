@@ -13,46 +13,14 @@
 #include "bs_dispatch.h"
 #include "ts.h"
 #include "ocl.hpp"
+#include "settings.h"
+#include "hybrid.hpp"
 
 using namespace std;
 
 #define VERSION         "V2.1"
 #define GITHASH_STR     GITHASH
 #define RESUMEFILENAME  "resume"
-
-/* --------------------------------------------------------------------------
-   Settings
-   -------------------------------------------------------------------------- */
-struct Settings {
-    Settings()
-        : benchmark(false)
-        , selftest(false)
-        , useGPU(false)
-        , simd("auto")
-        , keystart(0)
-        , keystop(0xFFFFFFFF)
-        , numThreads(1)
-        , keystartSpecified(false)
-    {}
-
-    bool     benchmark;
-    bool     selftest;
-    bool     useGPU;
-    string   simd;              /* auto | scalar | sse2 | avx2 | neon */
-    string   tsFilename;
-    uint32_t keystart;
-    uint32_t keystop;
-    int      numThreads;
-    bool     keystartSpecified; /* true when -a was given on the CLI */
-};
-
-/* --------------------------------------------------------------------------
-   Utility: timing (also used by the GPU progress report)
-   -------------------------------------------------------------------------- */
-static uint64_t getTicksMs() {
-    using namespace std::chrono;
-    return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
-}
 
 /* --------------------------------------------------------------------------
    Resume file (read side; write side lives in the per-backend driver)
@@ -79,7 +47,7 @@ static void bfReadResumeFile(uint32_t *key) {
 }
 
 /* --------------------------------------------------------------------------
-   Found-key file (shared with the per-backend driver)
+   Found-key file (shared with the per-backend driver and hybrid runner)
    -------------------------------------------------------------------------- */
 void bfWriteKeyFoundFile(const unsigned char *cw) {
     printf("writing result to file \"keyfound\"\n");
@@ -107,6 +75,7 @@ static void printUsage() {
     printf("   -o stop cw       when this cw is reached, program terminates [FFFFFFFFFFFF]\n");
     printf("   -p threads       number of parallel threads (default: 1)\n");
     printf("   -g               use GPU (OpenCL) for brute force search\n");
+    printf("   -c, --cpu-gpu    run CPU and GPU at the same time\n");
     printf("   -S backend       SIMD backend: auto (default) | scalar | sse2 | avx2\n");
     printf("                    | neon. 'auto' detects the best one on this CPU.\n");
     printf("                    Use -S list to show which backends are available.\n");
@@ -160,6 +129,7 @@ static Settings parse(int argc, char *argv[]) {
             settings.numThreads = stoi(string(*it));
             if (settings.numThreads < 1)
                 throw runtime_error("Thread count must be >= 1");
+            settings.numThreadsSpecified = true;
             continue;
         }
 
@@ -185,6 +155,13 @@ static Settings parse(int argc, char *argv[]) {
             continue;
         }
 
+        if (*it == "-c" || *it == "--cpu-gpu" || *it == "--hybrid") {
+            settings.hybrid = true;
+            settings.useGPU = true;
+            settings.useCPU = true;
+            continue;
+        }
+
         if (*it == "-s") {
             settings.selftest = true;
             continue;
@@ -196,6 +173,21 @@ static Settings parse(int argc, char *argv[]) {
         }
 
         throw runtime_error(string("unknown option: ") + string(*it));
+    }
+
+    /* Resolve mode */
+    if (settings.hybrid) {
+        settings.useGPU = true;
+        settings.useCPU = true;
+    } else if (settings.useGPU) {
+        if (settings.numThreadsSpecified) {
+            settings.hybrid = true;
+            settings.useCPU = true;
+        } else {
+            settings.useCPU = false;
+        }
+    } else {
+        settings.useCPU = true;
     }
 
     return settings;
@@ -241,9 +233,17 @@ static void printBanner(const Settings& settings, const BSDriver* se) {
 #ifdef _DEBUG
     cout << " DEBUG";
 #endif
-    if (settings.useGPU)
+    if (settings.hybrid) {
+        cout << "\nHybrid mode (CPU + GPU simultaneously)";
+        cout << "\nCPU threads    : " << settings.numThreads << " thread"
+             << (settings.numThreads > 1 ? "s" : "");
+        cout << "\nSIMD backend   : " << se->name << " - " << se->desc
+             << (isAuto ? " (auto-detected)" : " (manual)");
+        cout << "\nparallel bitslice batch size is " << se->batchSize;
+        cout << "\nGPU backend    : OpenCL";
+    } else if (settings.useGPU) {
         cout << "\nGPU mode (OpenCL)";
-    else {
+    } else {
         cout << "\nCPU only";
         if (settings.numThreads > 1)
             cout << ", " << settings.numThreads << " threads";
@@ -260,11 +260,6 @@ static void printBanner(const Settings& settings, const BSDriver* se) {
 /* --------------------------------------------------------------------------
    Self-test mode
    -------------------------------------------------------------------------- */
-/* Runs the built-in algorithm self test.  With -S auto the test is executed
-   for EVERY backend that is compiled in and supported by this CPU — that is
-   the unit test that every SIMD implementation produces identical
-   libdvbcsa-verified results.  A specific backend can be tested alone with
-   -s -S <backend>. */
 static void runSelfTest(const Settings& settings, const BSDriver* se) {
     const bool all = (settings.simd == "auto");
 
@@ -294,150 +289,35 @@ static void runSelfTest(const Settings& settings, const BSDriver* se) {
         se->selfTest();
         cout << "===== backend " << se->name << ": PASSED =====\n";
     }
+
+    if (settings.hybrid) {
+        cout << "\n===== CPU+GPU hybrid self-test (" << se->name << " + OpenCL) =====\n";
+        cout << "Searching demo key 00 11 22 33 44 00 00 44 with CPU and GPU simultaneously...\n";
+        uint8_t foundKey[8] = {0};
+        bool ok = runHybridSearch(settings, se, bfDemoData,
+                                  0x00112200, 0x00112244,
+                                  /*isBenchmark=*/true, /*isSelfTest=*/true,
+                                  foundKey);
+        if (!ok) {
+            cerr << "FAIL: CPU+GPU hybrid self-test did not find known key!\n";
+            exit(ERR_FATAL);
+        }
+        cout << "===== CPU+GPU hybrid self-test: PASSED =====\n\n";
+    } else if (settings.useGPU) {
+        cout << "\n===== GPU (OpenCL) self-test =====\n";
+        uint8_t foundKey[8] = {0};
+        bool ok = runGpuSearch(settings, bfDemoData,
+                               0x00112200, 0x00112244,
+                               /*isBenchmark=*/true, /*isSelfTest=*/true,
+                               foundKey);
+        if (!ok) {
+            cerr << "FAIL: GPU self-test did not find known key!\n";
+            exit(ERR_FATAL);
+        }
+        cout << "===== GPU (OpenCL) self-test: PASSED =====\n\n";
+    }
+
     cout << "Self-test PASSED\n";
-}
-
-/* --------------------------------------------------------------------------
-   GPU (OpenCL) brute-force search
-   -------------------------------------------------------------------------- */
-
-/* verifyCw() now lives in ocl.hpp (single shared implementation). */
-
-/* Find kernel source file — try several paths relative to CWD */
-static string findKernelPath() {
-    const char *candidates[] = {
-        "src/aycwabtu.cl",
-        "../src/aycwabtu.cl",
-        "aycwabtu.cl",
-        nullptr
-    };
-    for (int i = 0; candidates[i]; i++) {
-        FILE *f = fopen(candidates[i], "r");
-        if (f) { fclose(f); return candidates[i]; }
-    }
-    return "";
-}
-
-static string loadKernelSource(const char *path) {
-    FILE *f = fopen(path, "r");
-    if (!f) return "";
-    fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    string src(sz, '\0');
-    fread(&src[0], 1, sz, f);
-    fclose(f);
-    return src;
-}
-
-static void bruteForceGPU(const Settings& settings,
-                          unsigned char probedata[3][16]) {
-#ifndef HAVE_OPENCL
-    (void)settings; (void)probedata;
-    cerr << "Error: GPU (OpenCL) support was not compiled into this build.\n"
-         << "       Rebuild on a machine with an OpenCL toolchain (Linux:\n"
-         << "       install ocl-icd-opencl-dev + headers), or run in CPU mode\n"
-         << "       (omit -g or use -p <threads>)." << endl;
-    exit(ERR_FATAL);
-#else
-    /* Find and load kernel */
-    string kernelPath = findKernelPath();
-    if (kernelPath.empty()) {
-        cerr << "Error: cannot find OpenCL kernel source (aycwabtu.cl)" << endl;
-        cerr << "Searched: src/aycwabtu.cl, ../src/aycwabtu.cl, aycwabtu.cl" << endl;
-        exit(ERR_FATAL);
-    }
-    cout << "Loading kernel from: " << kernelPath << endl;
-
-    string kernelSrc = loadKernelSource(kernelPath.c_str());
-    if (kernelSrc.empty()) {
-        cerr << "Error: failed to read kernel source" << endl;
-        exit(ERR_FATAL);
-    }
-
-    /* Initialize OpenCL */
-    OclContext ocl;
-    if (!ocl_init(ocl, kernelSrc.c_str())) {
-        cerr << "Error: OpenCL initialization failed" << endl;
-        exit(ERR_FATAL);
-    }
-
-    /* Flatten probedata: [3][16] -> [48] */
-    uint8_t probe[48];
-    memcpy(probe, probedata, 48);
-
-    /* Search in chunks to allow progress reporting while amortizing per-
-       launch overhead.  Override with AYCWABTU_GPU_CHUNK_SIZE. */
-    uint32_t chunkSize = 262144;  /* outer keys per GPU launch */
-    char* env_chunk = std::getenv("AYCWABTU_GPU_CHUNK_SIZE");
-    if (env_chunk && env_chunk[0]) {
-        long cs = std::atol(env_chunk);
-        if (cs < 1) {
-            cerr << "Error: AYCWABTU_GPU_CHUNK_SIZE must be a positive number"
-                 << endl;
-            exit(ERR_USAGE);
-        }
-        chunkSize = (uint32_t)cs;
-    }
-    uint32_t keyStart = settings.keystart;
-    uint32_t keyStop  = settings.keystop;
-
-    cout << "GPU search: keys " << hex << keyStart << " .. " << keyStop << dec << endl;
-    cout << "Chunk size: " << chunkSize << " outer keys per launch" << endl;
-
-    uint64_t startTime = getTicksMs();
-    uint64_t outerKeysDone = 0;
-    uint64_t totalOuterKeys = (uint64_t)keyStop - keyStart + 1;
-
-    /* 64-bit cursor so the loop ALWAYS terminates even when keyStop is
-       near 0xFFFFFFFF: a 32-bit `chunkStart += chunkSize` would wrap past
-       the end and re-scan from the beginning forever. */
-    for (uint64_t cur = keyStart; cur <= (uint64_t)keyStop; ) {
-        uint32_t chunkStart = (uint32_t)cur;
-        uint64_t remaining  = (uint64_t)keyStop - cur + 1;
-        uint32_t count = (remaining < (uint64_t)chunkSize) ? (uint32_t)remaining : chunkSize;
-
-        uint8_t cw_out[8] = {0};
-        bool found = ocl_search(ocl, probe, chunkStart, count,
-                                0, 65536, cw_out);
-
-        outerKeysDone += count;
-        cur += count;
-
-        /* Progress report */
-        uint64_t now = getTicksMs();
-        float elapsed = (now - startTime) / 1000.0f;
-        float mcwPerSec = elapsed > 0.0f
-            ? (outerKeysDone * 65536.0f) / elapsed / 1e6f : 0.0f;
-        float pctDone = totalOuterKeys
-            ? (outerKeysDone * 100.0f) / totalOuterKeys : 0.0f;
-
-        printf("\rGPU: %.1f%% done, %.1f Mcw/s, key %08X .. ",
-               pctDone, mcwPerSec, chunkStart + count);
-        fflush(stdout);
-
-        if (found) {
-            printf("\n\nGPU reports KEY FOUND: %02X %02X %02X [%02X]  %02X %02X %02X [%02X]\n",
-                   cw_out[0], cw_out[1], cw_out[2], cw_out[3],
-                   cw_out[4], cw_out[5], cw_out[6], cw_out[7]);
-
-            /* ocl_search already CPU-validated this winner (returns true only
-               for a real PES-valid key), so accept it directly.  No retry. */
-            if (verifyCw(probe, cw_out)) {
-                printf("CPU verify: all 3 packets decrypted to 0x000001 - accepting key\n");
-                if (!settings.benchmark) {
-                    bfWriteKeyFoundFile(cw_out);
-                }
-                ocl_cleanup(ocl);
-                exit(OK);
-            }
-            printf("CPU verify failed on GPU-reported key - not accepted (no retry)\n");
-        }
-    }
-
-    printf("\nGPU search complete. No key found.\n");
-    ocl_cleanup(ocl);
-#endif /* HAVE_OPENCL */
 }
 
 /* --------------------------------------------------------------------------
@@ -452,7 +332,7 @@ int main(int argc, char *argv[]) {
         cerr << "Error: " << x.what() << '\n';
         cerr << "Usage: " << argv[0]
              << " [-t filename] [-a start_cw] [-o stop_cw] [-p threads]\n"
-             << "                 [-S backend] -b -s -h\n";
+             << "                 [-g] [-c] [-S backend] -b -s -h\n";
         return EXIT_FAILURE;
     }
 
@@ -460,6 +340,16 @@ int main(int argc, char *argv[]) {
     if (!settings.benchmark && !settings.selftest && settings.tsFilename.empty()) {
         cerr << "Neither ts filename provided nor benchmark enabled" << endl;
         printUsage();
+        return ERR_USAGE;
+    }
+
+    /* Validate key range for real searches (benchmark and self-test use
+       their own hardcoded ranges and ignore the CLI -a/-o values). */
+    if (!settings.benchmark && !settings.selftest &&
+        settings.keystart > settings.keystop) {
+        cerr << "Error: start key must be <= stop key (got start=0x"
+             << hex << settings.keystart << " stop=0x" << settings.keystop
+             << dec << ")" << endl;
         return ERR_USAGE;
     }
 
@@ -474,23 +364,50 @@ int main(int argc, char *argv[]) {
         return EXIT_SUCCESS;
     }
 
-    /* Read resume file for non-benchmark runs (single-threaded only), unless
+    /* Read resume file for non-benchmark runs (single-threaded CPU only), unless
        the user already supplied -a explicitly (CLI wins over resume). */
-    if (!settings.benchmark && settings.numThreads == 1 && !settings.keystartSpecified) {
+    if (!settings.benchmark && !settings.useGPU && !settings.hybrid &&
+        settings.numThreads == 1 && !settings.keystartSpecified) {
         bfReadResumeFile(&settings.keystart);
     }
 
     if (settings.benchmark) {
-        se->benchmark(settings.numThreads);
-        return EXIT_SUCCESS;
+        if (settings.hybrid) {
+            cout << "Starting CPU + GPU hybrid benchmarking" << endl;
+            uint32_t keystart = 0x00 << 24 | 0x11 << 16 | 0x15 << 8 | 0x00;
+            uint32_t keystop  = 0xFFFFFFFF;
+            runHybridSearch(settings, se, bfDemoData, keystart, keystop,
+                            /*isBenchmark=*/true, /*isSelfTest=*/false);
+            return EXIT_SUCCESS;
+        } else if (settings.useGPU) {
+            cout << "Starting GPU benchmarking" << endl;
+            uint32_t keystart = 0x00 << 24 | 0x11 << 16 | 0x15 << 8 | 0x00;
+            uint32_t keystop  = 0xFFFFFFFF;
+            runGpuSearch(settings, bfDemoData, keystart, keystop,
+                         /*isBenchmark=*/true, /*isSelfTest=*/false);
+            return EXIT_SUCCESS;
+        } else {
+            se->benchmark(settings.numThreads);
+            return EXIT_SUCCESS;
+        }
     }
 
     /* Load TS data */
     unsigned char probedata[3][16];
     ayc_read_ts(settings.tsFilename.c_str(), &probedata[0][0]);
 
-    if (settings.useGPU) {
-        bruteForceGPU(settings, probedata);
+    if (settings.hybrid) {
+        bool found = runHybridSearch(settings, se, probedata,
+                                     settings.keystart, settings.keystop,
+                                     /*isBenchmark=*/false, /*isSelfTest=*/false);
+        if (found) return 0;
+        return 0;
+    } else if (settings.useGPU) {
+        bool found = runGpuSearch(settings, probedata,
+                                  settings.keystart, settings.keystop,
+                                  /*isBenchmark=*/false, /*isSelfTest=*/false);
+        if (found) return 0;
+        return 0;
     } else if (settings.numThreads > 1) {
         se->bruteForceParallel(settings.keystart, settings.keystop,
                                settings.numThreads, /*isBenchmark=*/false,

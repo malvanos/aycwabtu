@@ -252,25 +252,46 @@ bool ocl_search(OclContext& ocl,
                 uint32_t key_count,
                 uint32_t inner_start,
                 uint32_t inner_count,
-                uint8_t cw_out[8]) {
+                uint8_t cw_out[8],
+                const std::atomic<int>* abortFlag,
+                uint32_t* keysProcessed) {
     if (!ocl.ready) return false;
 
     cl_int err;
 
-    /* Buffers (created once; reused across sub-dispatches) */
-    cl_mem buf_probe = clCreateBuffer(ocl.context,
-        CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-        48, (void*)probedata, &err);
-    if (err != CL_SUCCESS) return false;
+    /* Buffers created lazily on first call, cached in OclContext and reused
+       across calls (avoids per-chunk create/destroy overhead in hybrid mode).
+       The probe data is constant for the lifetime of the search. */
+    if (!ocl.buf_probe) {
+        ocl.buf_probe = clCreateBuffer(ocl.context,
+            CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+            48, (void*)probedata, &err);
+        if (err != CL_SUCCESS) {
+            std::cerr << "OpenCL error: clCreateBuffer(probe) failed ("
+                      << err << ")" << std::endl;
+            ocl.error = true;
+            if (keysProcessed) *keysProcessed = 0;
+            return false;
+        }
+    }
+    if (!ocl.buf_found) {
+        uint32_t found_init[3] = { 0, 0, 0 };
+        ocl.buf_found = clCreateBuffer(ocl.context,
+            CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+            sizeof(found_init), found_init, &err);
+        if (err != CL_SUCCESS) {
+            std::cerr << "OpenCL error: clCreateBuffer(found) failed ("
+                      << err << ")" << std::endl;
+            ocl.error = true;
+            if (keysProcessed) *keysProcessed = 0;
+            return false;
+        }
+    }
 
     uint32_t found_init[3] = { 0, 0, 0 };
-    cl_mem buf_found = clCreateBuffer(ocl.context,
-        CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
-        sizeof(found_init), found_init, &err);
-    if (err != CL_SUCCESS) { clReleaseMemObject(buf_probe); return false; }
 
-    clSetKernelArg(ocl.kernel, 0, sizeof(cl_mem), &buf_probe);
-    clSetKernelArg(ocl.kernel, 1, sizeof(cl_mem), &buf_found);
+    clSetKernelArg(ocl.kernel, 0, sizeof(cl_mem), &ocl.buf_probe);
+    clSetKernelArg(ocl.kernel, 1, sizeof(cl_mem), &ocl.buf_found);
     clSetKernelArg(ocl.kernel, 4, sizeof(uint32_t), &inner_start);
     clSetKernelArg(ocl.kernel, 5, sizeof(uint32_t), &inner_count);
 
@@ -279,14 +300,24 @@ bool ocl_search(OclContext& ocl,
        winner; no-find sub-dispatches are simply skipped. */
     uint32_t offset = 0;
     while (offset < key_count) {
+        if (abortFlag && abortFlag->load(std::memory_order_relaxed) != 0) {
+            break;
+        }
+
         uint32_t chunk = key_count - offset;
         if (chunk > ocl.itemsCap) chunk = ocl.itemsCap;
 
         /* Re-zero the found flag so every sub-dispatch runs all items */
-        err = clEnqueueWriteBuffer(ocl.queue, buf_found, CL_TRUE, 0,
+        err = clEnqueueWriteBuffer(ocl.queue, ocl.buf_found, CL_TRUE, 0,
                                    sizeof(found_init), found_init,
                                    0, nullptr, nullptr);
-        if (err != CL_SUCCESS) { clReleaseMemObject(buf_probe); clReleaseMemObject(buf_found); return false; }
+        if (err != CL_SUCCESS) {
+            std::cerr << "OpenCL error: clEnqueueWriteBuffer failed ("
+                      << err << ")" << std::endl;
+            ocl.error = true;
+            if (keysProcessed) *keysProcessed = offset;
+            return false;
+        }
 
         uint32_t chunk_start = key_start + offset;
         size_t global_size = ((chunk + wg_size - 1) / wg_size) * wg_size;
@@ -296,13 +327,25 @@ bool ocl_search(OclContext& ocl,
 
         err = clEnqueueNDRangeKernel(ocl.queue, ocl.kernel, 1, nullptr,
                                      &global_size, &wg_size, 0, nullptr, nullptr);
-        if (err != CL_SUCCESS) { clReleaseMemObject(buf_probe); clReleaseMemObject(buf_found); return false; }
+        if (err != CL_SUCCESS) {
+            std::cerr << "OpenCL error: clEnqueueNDRangeKernel failed ("
+                      << err << ")" << std::endl;
+            ocl.error = true;
+            if (keysProcessed) *keysProcessed = offset;
+            return false;
+        }
 
         uint32_t found_out[3];
-        err = clEnqueueReadBuffer(ocl.queue, buf_found, CL_TRUE, 0,
+        err = clEnqueueReadBuffer(ocl.queue, ocl.buf_found, CL_TRUE, 0,
                                   sizeof(found_out), found_out,
                                   0, nullptr, nullptr);
-        if (err != CL_SUCCESS) { clReleaseMemObject(buf_probe); clReleaseMemObject(buf_found); return false; }
+        if (err != CL_SUCCESS) {
+            std::cerr << "OpenCL error: clEnqueueReadBuffer failed ("
+                      << err << ")" << std::endl;
+            ocl.error = true;
+            if (keysProcessed) *keysProcessed = offset;
+            return false;
+        }
 
         if (found_out[0] != 0) {
             uint8_t temp_cw[8];
@@ -310,8 +353,7 @@ bool ocl_search(OclContext& ocl,
             /* CPU-verify: reject any fabricated winner (corrupt threadgroup). */
             if (verifyCw(probedata, temp_cw)) {
                 memcpy(cw_out, temp_cw, 8);
-                clReleaseMemObject(buf_probe);
-                clReleaseMemObject(buf_found);
+                if (keysProcessed) *keysProcessed = offset + chunk;
                 return true;
             }
             /* False positive: not accepted, no retry — move on. */
@@ -319,12 +361,13 @@ bool ocl_search(OclContext& ocl,
         offset += chunk;
     }
 
-    clReleaseMemObject(buf_probe);
-    clReleaseMemObject(buf_found);
+    if (keysProcessed) *keysProcessed = offset;
     return false;
 }
 
 void ocl_cleanup(OclContext& ocl) {
+    if (ocl.buf_probe) { clReleaseMemObject(ocl.buf_probe); ocl.buf_probe = nullptr; }
+    if (ocl.buf_found) { clReleaseMemObject(ocl.buf_found); ocl.buf_found = nullptr; }
     if (ocl.kernel)  clReleaseKernel(ocl.kernel);
     if (ocl.program) clReleaseProgram(ocl.program);
     if (ocl.queue)   clReleaseCommandQueue(ocl.queue);

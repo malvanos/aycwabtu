@@ -35,6 +35,7 @@
 #include "bs_testcases.h"
 #include "dvbcsa.h"
 #include "bs_driver_api.h"
+#include "work_coordinator.h"
 
 using namespace std;
 
@@ -474,15 +475,6 @@ static void partsBenchmark() {
 /* --------------------------------------------------------------------------
    Benchmark mode
    -------------------------------------------------------------------------- */
-static const unsigned char bfDemoData[3][16] = {
-    { 0xB2, 0x74, 0x85, 0x51, 0xF9, 0x3C, 0x9B, 0xD2,
-      0x30, 0x9E, 0x8E, 0x78, 0xFB, 0x16, 0x55, 0xA9 },
-    { 0x25, 0x2D, 0x3D, 0xAB, 0x5E, 0x3B, 0x31, 0x39,
-      0xFE, 0xDF, 0xCD, 0x84, 0x51, 0x5A, 0x86, 0x4A },
-    { 0xD0, 0xE1, 0x78, 0x48, 0xB3, 0x41, 0x63, 0x22,
-      0x25, 0xA3, 0x63, 0x0A, 0x0E, 0xD3, 0x1C, 0x70 }
-};
-
 static void benchmarkImpl(int numThreads) {
     cout << "Starting micro-benchmarking" << endl;
     partsBenchmark();
@@ -687,4 +679,156 @@ extern "C" void ayc_benchmark(int numThreads) {
 
 extern "C" void ayc_selfTest(void) {
     selfTestImpl();
+}
+
+/* --------------------------------------------------------------------------
+   Chunk-based worker for hybrid CPU+GPU search
+   -------------------------------------------------------------------------- */
+static void bruteForceChunkWorkerImpl(WorkCoordinator* coordinator,
+                                      int tid, int nThreads,
+                                      const unsigned char probedata[3][16],
+                                      bool isBenchmark) {
+    dvbcsa_bs_word_t bs_data_sb0[8 * 16];
+    dvbcsa_bs_word_t bs_data_ib0[8 * 16];
+    dvbcsa_bs_word_t keys_bs[64];
+    dvbcsa_bs_word_t keyskk[448];
+
+#ifdef USEBLOCKVIRTUALSHIFT
+    dvbcsa_bs_word_t r[8 * (1 + 8 + 56)];
+#else
+    dvbcsa_bs_word_t r[8 * (1 + 8 + 0)];
+#endif
+
+    dvbcsa_bs_word_t candidates;
+    uint8 keylist[BS_BATCH_SIZE][8];
+
+    aycw_init_block();
+    aycw_init_stream(probedata[0], bs_data_sb0);
+
+    for (int i = 0; i < 8 * 8; i++) {
+        bs_data_ib0[i] = bs_data_sb0[i];
+    }
+#ifndef USEALLBITSLICE
+    aycw_bit2byteslice(bs_data_ib0, 1);
+#endif
+
+    uint32_t cpuChunkSize = 32;
+    const char* env_cpu_chunk = std::getenv("AYCWABTU_CPU_CHUNK_SIZE");
+    if (env_cpu_chunk && env_cpu_chunk[0]) {
+        long cs = std::atol(env_cpu_chunk);
+        if (cs >= 1) cpuChunkSize = (uint32_t)cs;
+    }
+
+    uint32_t chunkStart = 0;
+    uint32_t count = 0;
+
+    while (coordinator->getNextChunk(cpuChunkSize, chunkStart, count)) {
+        uint32_t chunkStop = chunkStart + count - 1;
+        uint32_t currentKey = chunkStart;
+
+        while (currentKey <= chunkStop && coordinator->keyFound.load(std::memory_order_relaxed) == 0) {
+            for (int i = 0; i < BS_BATCH_SIZE; i++) {
+                keylist[i][0] = currentKey >> 24;
+                keylist[i][1] = currentKey >> 16;
+                keylist[i][2] = currentKey >> 8;
+                keylist[i][3] = keylist[i][0] + keylist[i][1] + keylist[i][2];
+                keylist[i][4] = currentKey;
+                keylist[i][5] = 0;
+                keylist[i][6] = (0x0100 >> BS_BATCH_SHIFT) * i;
+                keylist[i][7] = keylist[i][4] + keylist[i][5] + keylist[i][6];
+            }
+
+            aycw_key_transpose(&keylist[0][0], keys_bs);
+            aycw_assert_key_transpose(&keylist[0][0], keys_bs);
+
+            for (int k = 0; k < KEYSPERINNERLOOP / BS_BATCH_SIZE; k++) {
+                /* Stop early if the GPU (or another CPU thread) already found
+                   the key — avoids wasting up to 2^16 inner-key iterations. */
+                if (coordinator->keyFound.load(std::memory_order_relaxed) != 0)
+                    return;
+
+                aycw_assertKeyBatch(keys_bs);
+
+                aycw_stream_decrypt(&bs_data_ib0[64], 24, keys_bs, bs_data_sb0);
+                aycw_assert_stream(&bs_data_ib0[64], 24, keys_bs, bs_data_sb0);
+
+#ifndef USEALLBITSLICE
+                aycw_bit2byteslice(&bs_data_ib0[64], 1);
+#endif
+
+#ifdef USEBLOCKVIRTUALSHIFT
+                std::memcpy(&r[8 * 56], bs_data_ib0, 8 * 8 * sizeof(dvbcsa_bs_word_t));
+#else
+                std::memcpy(r, bs_data_ib0, 8 * 8 * sizeof(dvbcsa_bs_word_t));
+#endif
+
+                aycw_block_key_schedule(keys_bs, keyskk);
+
+#ifndef USEALLBITSLICE
+                aycw_bit2byteslice(keyskk, 7);
+#endif
+
+                aycw_block_decrypt(keyskk, r);
+
+                aycw_bs_xor24(r, r, &bs_data_ib0[64]);
+
+                aycw_assert_decrypt_result((unsigned char *)&probedata[0][0], &keylist[0][0], r);
+
+                int p = aycw_checkPESheader(r, &candidates);
+                if (p) {
+                    for (int bi = 0; bi < BS_BATCH_SIZE; bi++) {
+                        unsigned char cw[8];
+                        dvbcsa_key_t   key;
+                        unsigned char  data[16];
+                        memset(cw, 255, sizeof(cw));
+
+                        if (1 == BS_EXTLS32(BS_AND(BS_SHR(candidates, bi), BS_VAL8(01)))) {
+                            aycw_extractbsdata(keys_bs, bi, 64, cw);
+                            dvbcsa_key_set(cw, &key);
+
+                            memcpy(&data, &probedata[0], 16);
+                            dvbcsa_decrypt(&key, data, 16);
+                            if (data[0] != 0x00 || data[1] != 0x00 || data[2] != 0x01) {
+                                printf("\n[T%d] Fatal error: candidate verification failed!\n", tid);
+                                exit(ERR_FATAL);
+                            }
+
+                            memcpy(&data, &probedata[1], 16);
+                            dvbcsa_decrypt(&key, data, 16);
+                            if (data[0] == 0x00 && data[1] == 0x00 && data[2] == 0x01) {
+                                memcpy(&data, &probedata[2], 16);
+                                dvbcsa_decrypt(&key, data, 16);
+                                if (data[0] == 0x00 && data[1] == 0x00 && data[2] == 0x01) {
+                                    if (coordinator->claimFound(tid + 1, cw)) {
+                                        printf("\n[CPU T%d] key candidate successfully decrypted three packets\n", tid);
+                                        printf("KEY FOUND!!!    %02X %02X %02X [%02X]  %02X %02X %02X [%02X]\n",
+                                               cw[0], cw[1], cw[2], cw[3],
+                                               cw[4], cw[5], cw[6], cw[7]);
+                                        if (!isBenchmark) bfWriteKeyFoundFile(cw);
+                                    }
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                aycw_bs_increment_keys_inner(keys_bs);
+            }
+
+            coordinator->cpuKeysDone.fetch_add(KEYSPERINNERLOOP, std::memory_order_relaxed);
+
+            if (currentKey == chunkStop) break;
+            currentKey++;
+        }
+
+        if (coordinator->keyFound.load(std::memory_order_relaxed) != 0) break;
+    }
+}
+
+extern "C" void ayc_bruteForceChunkWorker(WorkCoordinator* coordinator,
+                                          int tid, int nThreads,
+                                          const unsigned char probedata[3][16],
+                                          bool isBenchmark) {
+    bruteForceChunkWorkerImpl(coordinator, tid, nThreads, probedata, isBenchmark);
 }

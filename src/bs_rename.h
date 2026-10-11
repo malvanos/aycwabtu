@@ -66,6 +66,7 @@
 #define ayc_bruteForceParallel        AYCW_RN(ayc_bruteForceParallel)
 #define ayc_benchmark                 AYCW_RN(ayc_benchmark)
 #define ayc_selfTest                  AYCW_RN(ayc_selfTest)
+#define ayc_bruteForceChunkWorker     AYCW_RN(ayc_bruteForceChunkWorker)
 
 #endif /* AYCW_BACKEND */
 

@@ -195,7 +195,7 @@ endif
 
 # one copy of the algorithm + driver per SIMD backend, plus the neutral units
 ayc_src        := bs_algo.c bs_stream.c bs_block_ab.c bs_testcases.c
-neutral_src    := main.cpp ocl.cpp ts.c bs_dispatch.cpp
+neutral_src    := main.cpp ocl.cpp ts.c bs_dispatch.cpp hybrid.cpp
 tsgen_src      := tsgen.c
 libdvbcsa_src  := \
 	libdvbcsa/dvbcsa_algo.c     \
@@ -218,15 +218,17 @@ tsgen: $(tsgen_obj) $(addprefix obj/libdvbcsa/, $(libdvbcsa_src:libdvbcsa/%.c=%.
 	$(LD) $(LDFLAGS) -o $@ $(tsgen_obj) $(addprefix obj/libdvbcsa/, $(libdvbcsa_src:libdvbcsa/%.c=%.o)) $(LDLIBS)
 	@echo $@ created
 
-# run the SIMD unit tests (self-tests for every backend + manual selection)
+# run the unit tests (SIMD + CPU/GPU hybrid)
 test: aycwabtu
 	cd test && ./test_simd.sh
+	cd test && ./test_cpu_gpu.sh
 
 check: aycwabtu tsgen always
 #	run the bundled end-to-end + SIMD unit tests + the legacy test frame.
 #	$$(TIMEOUT) is empty on systems without coreutils (runs unbounded).
 	$(if $(TIMEOUT),$(TIMEOUT) 5) ./aycwabtu -t test/Testfile_CW_7FFAE9A02486.ts -a 7FFAE9A00000
 	cd test && ./test_simd.sh
+	cd test && ./test_cpu_gpu.sh
 	cd test && $(if $(TIMEOUT),$(TIMEOUT) 60) ./testframe.sh
 
 always:
