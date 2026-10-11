@@ -33,7 +33,11 @@
                                                int, bool,                \
                                                const unsigned char (*)[16]); \
     extern "C" void ayc_benchmark_##b(int);                              \
-    extern "C" void ayc_selfTest_##b(void);
+    extern "C" void ayc_selfTest_##b(void);                              \
+    extern "C" void ayc_bruteForceChunkWorker_##b(WorkCoordinator*,      \
+                                                  int, int,              \
+                                                  const unsigned char (*)[16], \
+                                                  bool);
 
 AYCW_BS_DECL_DRIVER(scalar)
 AYCW_BS_DECL_DRIVER(sse2)
@@ -88,6 +92,7 @@ static BSDriver g_drivers[BSIMD__COUNT] = {
         /*built=*/true, /*supported=*/true,
         ayc_bruteForceRange_scalar, ayc_bruteForceParallel_scalar,
         ayc_benchmark_scalar, ayc_selfTest_scalar,
+        ayc_bruteForceChunkWorker_scalar,
     },
 #if AYCW_X86
     {
@@ -96,6 +101,7 @@ static BSDriver g_drivers[BSIMD__COUNT] = {
         /*built=*/true, /*supported=*/false,
         ayc_bruteForceRange_sse2, ayc_bruteForceParallel_sse2,
         ayc_benchmark_sse2, ayc_selfTest_sse2,
+        ayc_bruteForceChunkWorker_sse2,
     },
     {
         BSIMD_AVX2, "avx2", "AVX2 (256-bit)",
@@ -103,19 +109,20 @@ static BSDriver g_drivers[BSIMD__COUNT] = {
         /*built=*/true, /*supported=*/false,
         ayc_bruteForceRange_avx2, ayc_bruteForceParallel_avx2,
         ayc_benchmark_avx2, ayc_selfTest_avx2,
+        ayc_bruteForceChunkWorker_avx2,
     },
 #else
     {
         BSIMD_SSE2, "sse2", "SSE2 (128-bit)",
         2, 128,
         /*built=*/false, /*supported=*/false,
-        nullptr, nullptr, nullptr, nullptr,
+        nullptr, nullptr, nullptr, nullptr, nullptr,
     },
     {
         BSIMD_AVX2, "avx2", "AVX2 (256-bit)",
         4, 256,
         /*built=*/false, /*supported=*/false,
-        nullptr, nullptr, nullptr, nullptr,
+        nullptr, nullptr, nullptr, nullptr, nullptr,
     },
 #endif
 #if AYCW_ARM64
@@ -125,13 +132,14 @@ static BSDriver g_drivers[BSIMD__COUNT] = {
         /*built=*/true, /*supported=*/true,
         ayc_bruteForceRange_neon, ayc_bruteForceParallel_neon,
         ayc_benchmark_neon, ayc_selfTest_neon,
+        ayc_bruteForceChunkWorker_neon,
     },
 #else
     {
         BSIMD_NEON, "neon", "NEON (128-bit)",
         3, 128,
         /*built=*/false, /*supported=*/false,
-        nullptr, nullptr, nullptr, nullptr,
+        nullptr, nullptr, nullptr, nullptr, nullptr,
     },
 #endif
 };

@@ -31,6 +31,12 @@ void ayc_benchmark(int numThreads);
 
 void ayc_selfTest(void);
 
+struct WorkCoordinator;
+void ayc_bruteForceChunkWorker(WorkCoordinator* coordinator,
+                               int tid, int nThreads,
+                               const unsigned char probedata[3][16],
+                               bool isBenchmark);
+
 } /* extern "C" */
 
 #endif /* AYCW_BS_DRIVER_API_H_ */

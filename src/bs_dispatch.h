@@ -21,6 +21,8 @@ enum BSimdB {
     BSIMD_AUTO = 99   /* magic value: "pick the best" */
 };
 
+struct WorkCoordinator;
+
 struct BSDriver {
     BSimdB      id;
     const char* name;          /* CLI name for -S */
@@ -39,6 +41,10 @@ struct BSDriver {
                                const unsigned char probedata[3][16]);
     void (*benchmark)(int numThreads);
     void (*selfTest)(void);
+    void (*bruteForceChunkWorker)(WorkCoordinator* coordinator,
+                                  int tid, int nThreads,
+                                  const unsigned char probedata[3][16],
+                                  bool isBenchmark);
 };
 
 /* initialize the built/supported flags. Call once at startup. */

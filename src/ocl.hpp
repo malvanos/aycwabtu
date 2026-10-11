@@ -45,6 +45,15 @@ struct OclContext {
     bool             ready;
     size_t           wg_size = 128;   /* work-group size (tuned for M2 GPU) */
     uint32_t         itemsCap = 0; /* per-platform max thread-groups/sub-dispatch */
+
+    /* Buffers created lazily on first ocl_search call, reused across calls.
+       Released in ocl_cleanup. */
+    cl_mem           buf_probe = nullptr;
+    cl_mem           buf_found = nullptr;
+
+    /* Set to true when any OpenCL API call fails inside ocl_search.
+       Callers should check this and stop using the GPU. */
+    bool             error = false;
 };
 
 /* Initialise OpenCL: pick first GPU, compile kernel from embedded source.
@@ -58,6 +67,9 @@ bool ocl_init(OclContext& ocl, const char* kernel_source);
    - inner_start: start of inner 16-bit key loop (usually 0)
    - inner_count: number of inner keys per work-item (usually 65536)
    - cw_out: output control word (8 bytes), valid if return == true
+   - abortFlag: if non-null, the search aborts early when *abortFlag != 0
+   - keysProcessed: if non-null, receives the number of outer keys actually
+     searched (may be less than key_count if aborted or a key was found early)
    Returns true if a key was found.
    Internally key_count is searched as sequential sub-dispatches of at most
    itemsCap threadgroups.  On Apple cl2Metal the cap is 64 threadgroups because
@@ -65,13 +77,17 @@ bool ocl_init(OclContext& ocl, const char* kernel_source);
    threadgroups (provably clean at 64; verified by tools/bench_diag.cpp — see
    BUG.md).  Each sub-dispatch runs exactly once; code must CPU-verify a found
    winner before accepting it.  Callers may pass an arbitrarily large key_count. */
+#include <atomic>
+
 bool ocl_search(OclContext& ocl,
                 const uint8_t probedata[48],
                 uint32_t key_start,
                 uint32_t key_count,
                 uint32_t inner_start,
                 uint32_t inner_count,
-                uint8_t cw_out[8]);
+                uint8_t cw_out[8],
+                const std::atomic<int>* abortFlag = nullptr,
+                uint32_t* keysProcessed = nullptr);
 
 void ocl_cleanup(OclContext& ocl);
 #else
@@ -80,13 +96,16 @@ void ocl_cleanup(OclContext& ocl);
    error up front when -g is requested but OpenCL is compiled out. */
 struct OclContext {
     bool ready = false;
+    bool error = false;
 };
 
 inline bool ocl_init(OclContext&, const char*) {
     return false;
 }
 inline bool ocl_search(OclContext&, const uint8_t[48], uint32_t, uint32_t,
-                       uint32_t, uint32_t, uint8_t[8]) {
+                       uint32_t, uint32_t, uint8_t[8],
+                       const std::atomic<int>* = nullptr,
+                       uint32_t* = nullptr) {
     return false;
 }
 inline void ocl_cleanup(OclContext&) {}
