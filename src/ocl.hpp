@@ -1,6 +1,7 @@
 #ifndef AYCW_OCL_HPP
 #define AYCW_OCL_HPP
 
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include "dvbcsa.h"
