@@ -1,16 +1,17 @@
 # OpenCL GPU Implementation Plan
 
-## Status: Phase 2 in progress (code-verified 2026-10-11) — 129 Mcw/s after Phase A1+A2+A5
+## Status: Phase 2 in progress (code-verified 2026-10-11) — 129 Mcw/s after Phase A1+A2+A4+A5
 
 The OpenCL implementation is fully integrated and correct.
 - Phase 1 (CSA algorithm port): ✅ Complete
-- Phase 2 (Performance optimizations): 🔄 A1+A2+A5 done (95 → 129 Mcw/s); A3 skipped; A4, A6-A8 + Phase B remain
+- Phase 2 (Performance optimizations): 🔄 A1+A2+A4+A5 done (95 → 129 Mcw/s); A3 skipped; A6-A8 + Phase B remain
 - Phase 3 (Integration into main.cpp): ✅ Complete (resume file for GPU deferred)
 - Phase 4 (Productionize): ❌ Not started
 - Bug fix (threadgroup-count corruption): ✅ Complete (2026-08-18)
 - Bug fixes (PLAN2 — 12 bugs): ✅ Complete (commit `e873011`)
 - Hybrid CPU+GPU mode: ✅ Complete (2026-10-11, beyond original plan)
 - Host pipelining (A5): ✅ Complete (2026-10-11)
+- 64-TG ceiling re-test (A4): ✅ Complete (2026-10-11) — ceiling unchanged, cap stays at 64
 
 GPU search runs at **129.2 Mcw/s** on Apple M2 Pro (up from 95.1 baseline).
 Target: portable performance on **any OpenCL machine** (Apple/NVIDIA/AMD/Intel GPU,
@@ -102,7 +103,7 @@ handling, OpenCL bounds, and parser typos — all verified by `test/test_cpu_gpu
 | `src/main.cpp` | ✅ done (Phase 3) | `-g`, `-c`, `-s`, `-b` flags, GPU/hybrid search with progress |
 | `test_ocl.cpp` | ✅ done | Test program — verifies known key against GPU |
 | `bench_ocl.cpp` / `ocl_info.cpp` | ✅ done | Standalone benchmark/info tools (no makefile targets — A8) |
-| `tools/aycwabtu_diag.cl` | ✅ done | Differential harness kernel (A4 — not yet re-run) |
+| `tools/aycwabtu_diag.cl` | ✅ done + A4 re-run (2026-10-11) | Differential harness kernel; regenerated with A1+A2; ceiling re-tested |
 | `tools/fused_tables.py` | ✅ done (A2) | Generates `block_perm_sbox`; `--verify-only` cross-checks |
 | `test/test_cpu_gpu.sh` | ✅ done | Hybrid mode test suite |
 | `test_ocl_dbg.cpp` | ⚠️ stale | Debug file — fix or delete (A8) |
@@ -177,8 +178,8 @@ The kernel's CSA stream and block ciphers have been replaced with exact ports fr
 - [x] SIMD runtime auto-detection (`-S` flag)
 - [x] Self-test (`-s`) and benchmark (`-b`) modes for GPU and hybrid
 
-**Code-verified status (2026-10-11)**: A1+A2+A5 done and verified in `src/aycwabtu.cl` + `src/ocl.cpp`.
-A6 partially done (platform detection + env overrides). Remaining: A4, A6 (rest), A7, A8, Phase B (B1–B6).
+**Code-verified status (2026-10-11)**: A1+A2+A4+A5 done and verified in `src/aycwabtu.cl` + `src/ocl.cpp`.
+A6 partially done (platform detection + env overrides). Remaining: A6 (rest), A7, A8, Phase B (B1–B6).
 
 **Baseline results**: ~13 → **95.1 Mcw/s** (7.3× speedup) by increasing chunk size.
 Still well below what the GPU should deliver; the kernel burns ~470 random
@@ -217,10 +218,17 @@ divergent constant reads serialize on GPUs.
 - **A3** ⛔ skipped — `kperm[j][x]` returns a 64-bit word with cross-byte coupling; the
   chain operates on full `u64` words, not per-byte streams. Only ~5/470 lookups (~1%)
   can be hoisted — not worth the complexity.
-- **A4** ❌ re-test the 64-threadgroup ceiling with the per-gid differential harness
-  (`tools/aycwabtu_diag.cl` exists but has not been re-run after A1+A2);
-  raise the Apple cap only where provably clean.
-  CPU-verify gate stays regardless.
+- **A4** ✅ re-test the 64-threadgroup ceiling with the per-gid differential harness
+  (`bench_diag` + `tools/aycwabtu_diag.cl`, regenerated with A1+A2 changes).
+  **Result (2026-10-11, Apple M2 Pro, wg=128)**: ceiling unchanged at production
+  workload. Two independent clean runs (no concurrent GPU load):
+  - 8 reps, inner=65536 (full workload): G=72 PASS, G=76 FAIL → max clean = 72 groups (9216 items)
+  - 16 reps, inner=8192: G=80 PASS → ceiling rises at lower inner counts (A1+A2 made kernel lighter)
+  - wg=64, inner=8192: G=72 now clean (was corrupt before A1+A2)
+  - wg=256, inner=8192: ceiling ~32-36 groups (bug is per-dispatch threadgroups, not work-items)
+  **Decision: keep the Apple cap at 64 threadgroups (8192 items).** The 8-group
+  safety margin below the observed failure point is appropriate given the
+  nondeterministic nature of the bug. CPU-verify gate stays regardless.
 - **A5** ✅ host pipelining: double-buffered `found` (`buf_found[2]`) + non-blocking
   writes/reads (`CL_FALSE`) + events + look-ahead pipeline (depth 1).  The next
   sub-dispatch is enqueued while the previous readback is in flight, removing the
@@ -298,7 +306,7 @@ scalar kernel on NVIDIA/AMD-class GPUs; smaller on M2.
 1. ✅ `make && ./aycwabtu -t test/Testfile_CW_7FFAE9A02486.ts -g` → finds
    `7F FA E9 62 A0 24 86 4A`, CPU-verify passes; also key-at-chunk-boundary + clean-miss ranges
 2. ✅ Fused tables cross-checked: `tools/fused_tables.py --verify-only` compares kernel table vs generated
-3. 🟡 Per-gid differential harness: `tools/aycwabtu_diag.cl` exists (moved from /tmp) but **not re-run after A1+A2** (A4)
+3. ✅ Per-gid differential harness re-run after A1+A2 (2026-10-11): `bench_diag` with regenerated `tools/aycwabtu_diag.cl`. Result: ceiling unchanged at production workload (inner=65536, wg=128): G=72 PASS (8 reps), G=76 FAIL. Cap stays at 64.
 4. ❌ Bitsliced kernel: known-key test + randomized differential vs CPU over many
    random (outer, inner) pairs (Phase B)
 5. 🟡 `bench_ocl` geometry sweep: tool exists (`bench_ocl.cpp`), no makefile target (A8)
@@ -310,7 +318,7 @@ scalar kernel on NVIDIA/AMD-class GPUs; smaller on M2.
 |------|--------|
 | `src/aycwabtu.cl` | A1+A2 done ✅; A4; Phase B kernel (same program, second entry point) ❌ |
 | `tools/fused_tables.py` | A2 ✅: generates `block_perm_sbox`; `--verify-only` cross-checks the kernel |
-| `tools/aycwabtu_diag.cl` | A4 ✅: differential-harness kernel (moved from /tmp, not yet re-run) |
+| `tools/aycwabtu_diag.cl` | A4 ✅: differential-harness kernel (regenerated + re-run 2026-10-11) |
 | `src/ocl.cpp` / `src/ocl.hpp` | A5 ✅ (2026-10-11), A6 🟡 (partial), multi-kernel selection + geometry ❌ |
 | `src/hybrid.cpp` | A7 ❌ (device-driven chunking); hybrid mode ✅ done |
 | `src/main.cpp` | A7 ❌; `-g`, `-c`, `-s`, `-b` flags ✅ done |
@@ -329,14 +337,14 @@ final bench matrix + docs.
 
 | # | Item | Effort | Impact |
 |---|------|--------|--------|
-| A4 | Re-test 64-TG ceiling with `tools/aycwabtu_diag.cl` after A1+A2 | Low | Unlock larger dispatches on Apple |
+| A4 | ~~Re-test 64-TG ceiling~~ ✅ **DONE** (2026-10-11) — ceiling unchanged, cap stays at 64 | — | — |
 | A5 | ~~Host pipelining~~ ✅ **DONE** (2026-10-11) | — | — |
 | A6 | Complete device-adaptive geometry: `AYCWABTU_OCL_LANES`, inner-split S, per-kernel logging | Medium | Big win on NVIDIA/AMD (uncapped dispatches) |
 | A7 | Device-driven chunk size in `hybrid.cpp` (not hardcoded 262144) | Low | Auto-tune per device |
 | A8 | Cleanup: dead `get_kernel_source` decl, duplicate `wg_size`, stale `test_ocl_dbg.cpp`, makefile targets | Low | Code hygiene |
 | B1–B6 | **Bitsliced kernel** — port CPU bitsliced CSA to OpenCL (boolean sboxes, lane widths 32/64/128) | **High** | **Several× over scalar on NVIDIA/AMD** |
 
-**Recommended order**: A8 (quick cleanup) → A4+A6+A7 (device-adaptive) → B1–B6 (bitsliced kernel, the big win).
+**Recommended order**: A8 (quick cleanup) → A6+A7 (device-adaptive) → B1–B6 (bitsliced kernel, the big win).
 
 ### Phase 3: Integration ✅ COMPLETE (2026-10-11, code-verified)
 
