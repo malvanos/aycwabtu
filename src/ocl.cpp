@@ -261,7 +261,10 @@ bool ocl_search(OclContext& ocl,
 
     /* Buffers created lazily on first call, cached in OclContext and reused
        across calls (avoids per-chunk create/destroy overhead in hybrid mode).
-       The probe data is constant for the lifetime of the search. */
+       The probe data is constant for the lifetime of the search.
+       buf_found is double-buffered for A5 host pipelining: while the host
+       reads the result of sub-dispatch N from buf_found[N%2], the GPU can
+       already be running sub-dispatch N+1 writing to buf_found[(N+1)%2]. */
     if (!ocl.buf_probe) {
         ocl.buf_probe = clCreateBuffer(ocl.context,
             CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
@@ -274,91 +277,171 @@ bool ocl_search(OclContext& ocl,
             return false;
         }
     }
-    if (!ocl.buf_found) {
-        uint32_t found_init[3] = { 0, 0, 0 };
-        ocl.buf_found = clCreateBuffer(ocl.context,
-            CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
-            sizeof(found_init), found_init, &err);
-        if (err != CL_SUCCESS) {
-            std::cerr << "OpenCL error: clCreateBuffer(found) failed ("
-                      << err << ")" << std::endl;
-            ocl.error = true;
-            if (keysProcessed) *keysProcessed = 0;
-            return false;
+    for (int i = 0; i < 2; i++) {
+        if (!ocl.buf_found[i]) {
+            uint32_t found_init[3] = { 0, 0, 0 };
+            ocl.buf_found[i] = clCreateBuffer(ocl.context,
+                CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+                sizeof(found_init), found_init, &err);
+            if (err != CL_SUCCESS) {
+                std::cerr << "OpenCL error: clCreateBuffer(found[" << i
+                          << "]) failed (" << err << ")" << std::endl;
+                ocl.error = true;
+                if (keysProcessed) *keysProcessed = 0;
+                return false;
+            }
         }
     }
 
-    uint32_t found_init[3] = { 0, 0, 0 };
-
+    /* Constant kernel args — set once, never change across sub-dispatches. */
     clSetKernelArg(ocl.kernel, 0, sizeof(cl_mem), &ocl.buf_probe);
-    clSetKernelArg(ocl.kernel, 1, sizeof(cl_mem), &ocl.buf_found);
     clSetKernelArg(ocl.kernel, 4, sizeof(uint32_t), &inner_start);
     clSetKernelArg(ocl.kernel, 5, sizeof(uint32_t), &inner_count);
 
-    /* Each sub-dispatch runs EXACTLY ONCE (no retry).  The 64-group cap keeps
-       the geometry clean, and CPU verification below rejects any fabricated
-       winner; no-find sub-dispatches are simply skipped. */
-    uint32_t offset = 0;
-    while (offset < key_count) {
-        if (abortFlag && abortFlag->load(std::memory_order_relaxed) != 0) {
-            break;
-        }
+    /* ---- A5: host pipelining with double-buffered found + look-ahead ----
+       Each sub-dispatch runs EXACTLY ONCE (no retry).  The pipeline keeps
+       one sub-dispatch queued on the GPU while the host checks the result
+       of the previous one, eliminating the zero→kernel→read serialization.
 
-        uint32_t chunk = key_count - offset;
-        if (chunk > ocl.itemsCap) chunk = ocl.itemsCap;
+       Pipeline structure (look-ahead depth = 1):
+         prologue: enqueue sub-dispatch 0 (buf[0])
+         loop i = 0..N-1:
+           if i+1 < N: enqueue sub-dispatch i+1 (buf[(i+1)%2])
+           wait for sub-dispatch i's read event
+           check result; if found, return
+           if aborted, break
 
-        /* Re-zero the found flag so every sub-dispatch runs all items */
-        err = clEnqueueWriteBuffer(ocl.queue, ocl.buf_found, CL_TRUE, 0,
+       Non-blocking writes (CL_FALSE) and reads (CL_FALSE + event) keep the
+       CPU from stalling on the GPU.  The in-order command queue guarantees
+       correct execution order; double buffering ensures the write-zero of
+       sub-dispatch i+1 does not depend on the read of sub-dispatch i. */
+    uint32_t found_init[3] = { 0, 0, 0 };
+    uint32_t found_out[2][3] = {};   /* host-side double buffer */
+    cl_event read_events[2] = { nullptr, nullptr };
+
+    /* Enqueue one sub-dispatch: non-blocking write-zero → set args → kernel
+       → non-blocking read with event.  Returns false on OpenCL error. */
+    auto enqueue_subdispatch = [&](uint32_t chunk_start, uint32_t chunk,
+                                   int buf_idx) -> bool {
+        /* Re-zero the found flag (non-blocking; in-order queue ensures this
+           completes before the kernel reads/writes the buffer). */
+        err = clEnqueueWriteBuffer(ocl.queue, ocl.buf_found[buf_idx], CL_FALSE, 0,
                                    sizeof(found_init), found_init,
                                    0, nullptr, nullptr);
         if (err != CL_SUCCESS) {
             std::cerr << "OpenCL error: clEnqueueWriteBuffer failed ("
                       << err << ")" << std::endl;
             ocl.error = true;
-            if (keysProcessed) *keysProcessed = offset;
             return false;
         }
 
-        uint32_t chunk_start = key_start + offset;
-        size_t global_size = ((chunk + wg_size - 1) / wg_size) * wg_size;
-
+        /* Per-chunk kernel args (arg 1 = found buffer changes per buf_idx). */
+        clSetKernelArg(ocl.kernel, 1, sizeof(cl_mem), &ocl.buf_found[buf_idx]);
         clSetKernelArg(ocl.kernel, 2, sizeof(uint32_t), &chunk_start);
         clSetKernelArg(ocl.kernel, 3, sizeof(uint32_t), &chunk);
 
+        size_t global_size = ((chunk + wg_size - 1) / wg_size) * wg_size;
         err = clEnqueueNDRangeKernel(ocl.queue, ocl.kernel, 1, nullptr,
                                      &global_size, &wg_size, 0, nullptr, nullptr);
         if (err != CL_SUCCESS) {
             std::cerr << "OpenCL error: clEnqueueNDRangeKernel failed ("
                       << err << ")" << std::endl;
             ocl.error = true;
-            if (keysProcessed) *keysProcessed = offset;
             return false;
         }
 
-        uint32_t found_out[3];
-        err = clEnqueueReadBuffer(ocl.queue, ocl.buf_found, CL_TRUE, 0,
-                                  sizeof(found_out), found_out,
-                                  0, nullptr, nullptr);
+        /* Non-blocking read: returns immediately, event signals completion. */
+        err = clEnqueueReadBuffer(ocl.queue, ocl.buf_found[buf_idx], CL_FALSE, 0,
+                                  sizeof(found_out[buf_idx]), found_out[buf_idx],
+                                  0, nullptr, &read_events[buf_idx]);
         if (err != CL_SUCCESS) {
             std::cerr << "OpenCL error: clEnqueueReadBuffer failed ("
                       << err << ")" << std::endl;
             ocl.error = true;
-            if (keysProcessed) *keysProcessed = offset;
             return false;
         }
+        return true;
+    };
 
-        if (found_out[0] != 0) {
+    /* Number of sub-dispatches needed to cover key_count. */
+    uint32_t num_sd = (key_count + ocl.itemsCap - 1) / ocl.itemsCap;
+
+    /* Prologue: enqueue the first sub-dispatch. */
+    if (num_sd > 0) {
+        uint32_t c = (key_count < ocl.itemsCap) ? key_count : ocl.itemsCap;
+        if (!enqueue_subdispatch(key_start, c, 0)) {
+            if (keysProcessed) *keysProcessed = 0;
+            return false;
+        }
+    }
+
+    /* Main pipeline loop (look-ahead depth = 1).
+       At iteration sd_idx we have sub-dispatch sd_idx in flight (its read
+       event pending) and we enqueue sub-dispatch sd_idx+1 before waiting
+       for sd_idx's result.  Sub-dispatch n uses buffer n % 2. */
+    uint32_t offset = 0;   /* total outer keys checked so far */
+    uint32_t sd_idx = 0;
+    while (sd_idx < num_sd) {
+        if (abortFlag && abortFlag->load(std::memory_order_relaxed) != 0) {
+            break;
+        }
+
+        int cur_buf = sd_idx % 2;
+
+        /* Look-ahead: enqueue the next sub-dispatch before waiting. */
+        if (sd_idx + 1 < num_sd) {
+            uint32_t next_offset = (sd_idx + 1) * ocl.itemsCap;
+            uint32_t remaining = key_count - next_offset;
+            uint32_t next_chunk = (remaining < ocl.itemsCap) ? remaining : ocl.itemsCap;
+            if (!enqueue_subdispatch(key_start + next_offset, next_chunk,
+                                     (sd_idx + 1) % 2)) {
+                if (keysProcessed) *keysProcessed = offset;
+                clFinish(ocl.queue);
+                return false;
+            }
+        }
+
+        /* Wait for the current sub-dispatch's read to complete. */
+        if (read_events[cur_buf]) {
+            err = clWaitForEvents(1, &read_events[cur_buf]);
+            if (err != CL_SUCCESS) {
+                std::cerr << "OpenCL error: clWaitForEvents failed ("
+                          << err << ")" << std::endl;
+                ocl.error = true;
+                if (keysProcessed) *keysProcessed = offset;
+                return false;
+            }
+            clReleaseEvent(read_events[cur_buf]);
+            read_events[cur_buf] = nullptr;
+        }
+
+        /* Compute how many keys this sub-dispatch covered. */
+        uint32_t sd_offset = sd_idx * ocl.itemsCap;
+        uint32_t sd_chunk = (key_count - sd_offset < ocl.itemsCap)
+                                ? (key_count - sd_offset) : ocl.itemsCap;
+
+        /* Check the result. */
+        if (found_out[cur_buf][0] != 0) {
             uint8_t temp_cw[8];
-            unpack_cw(found_out[1], found_out[2], temp_cw);
+            unpack_cw(found_out[cur_buf][1], found_out[cur_buf][2], temp_cw);
             /* CPU-verify: reject any fabricated winner (corrupt threadgroup). */
             if (verifyCw(probedata, temp_cw)) {
                 memcpy(cw_out, temp_cw, 8);
-                if (keysProcessed) *keysProcessed = offset + chunk;
+                if (keysProcessed) *keysProcessed = sd_offset + sd_chunk;
+                clFinish(ocl.queue);
                 return true;
             }
             /* False positive: not accepted, no retry — move on. */
         }
-        offset += chunk;
+
+        offset = sd_offset + sd_chunk;
+        sd_idx++;
+    }
+
+    /* Drain any pending look-ahead sub-dispatch and release events. */
+    clFinish(ocl.queue);
+    for (int i = 0; i < 2; i++) {
+        if (read_events[i]) { clReleaseEvent(read_events[i]); read_events[i] = nullptr; }
     }
 
     if (keysProcessed) *keysProcessed = offset;
@@ -367,7 +450,9 @@ bool ocl_search(OclContext& ocl,
 
 void ocl_cleanup(OclContext& ocl) {
     if (ocl.buf_probe) { clReleaseMemObject(ocl.buf_probe); ocl.buf_probe = nullptr; }
-    if (ocl.buf_found) { clReleaseMemObject(ocl.buf_found); ocl.buf_found = nullptr; }
+    for (int i = 0; i < 2; i++) {
+        if (ocl.buf_found[i]) { clReleaseMemObject(ocl.buf_found[i]); ocl.buf_found[i] = nullptr; }
+    }
     if (ocl.kernel)  clReleaseKernel(ocl.kernel);
     if (ocl.program) clReleaseProgram(ocl.program);
     if (ocl.queue)   clReleaseCommandQueue(ocl.queue);
