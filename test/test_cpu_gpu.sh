@@ -13,6 +13,10 @@
 #   5. End-to-end key find on bundled TS file using hybrid CPU+GPU mode
 #   6. Keyfound output file correctness and cross-validation
 #   7. Stop key reached (negative range) handling without key find
+#
+# If the binary was built without OpenCL (CPU-only build - a supported
+# configuration), the GPU-dependent sections 3-7 are skipped with a notice
+# instead of failing.
 # -------------------------------------------------------------------------
 set -u
 
@@ -21,6 +25,7 @@ TS=Testfile_CW_7FFAE9A02486.ts
 
 PASS=0
 FAIL=0
+SKIP=0
 
 ok()   { PASS=$((PASS+1)); echo "  PASS: $1"; }
 bad()  { FAIL=$((FAIL+1)); echo "  FAIL: $1"; }
@@ -95,6 +100,26 @@ if echo "$OUT" | grep -q "Hybrid mode (CPU + GPU simultaneously)"; then
 else
     bad "-g -p 2 banner output"
 fi
+
+# ------------------------------------------------------------------ GPU availability
+# A CPU-only build (no OpenCL toolchain at build time) is a supported
+# configuration: the binary still runs, but hybrid/GPU runs abort with a
+# clear error.  Detect that once here and skip the GPU-dependent sections
+# (3-6) below instead of failing them.
+echo
+echo "-- GPU availability"
+if "$BIN" --cpu-gpu -s 2>&1 | grep -qF "GPU (OpenCL) support was not compiled into this build"; then
+    SKIP=$((SKIP+1))
+    echo "  SKIP: binary built without OpenCL (CPU-only build);"
+    echo "        hybrid/GPU sections 3-6 skipped.  Rebuild on a machine with an"
+    echo "        OpenCL toolchain (WITH_OPENCL=1) to run them."
+    echo
+    echo "=========================================="
+    echo "CPU+GPU hybrid unit tests: $PASS passed, $FAIL failed, $SKIP skipped (OpenCL not compiled in)"
+    echo "=========================================="
+    if [ "$FAIL" -eq 0 ]; then exit 0; else exit 1; fi
+fi
+ok "binary supports OpenCL hybrid mode"
 
 # ------------------------------------------------------------------ 3. Self-test in hybrid mode
 echo
@@ -227,7 +252,7 @@ cleanup
 
 echo
 echo "=========================================="
-echo "CPU+GPU hybrid unit tests: $PASS passed, $FAIL failed"
+echo "CPU+GPU hybrid unit tests: $PASS passed, $FAIL failed, $SKIP skipped"
 echo "=========================================="
 
 [ "$FAIL" -eq 0 ]

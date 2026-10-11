@@ -13,6 +13,12 @@ jobs:
 
     steps:
     - uses: actions/checkout@v3
+    # OpenCL ICD loader + headers (build-time) and PoCL (a CPU OpenCL
+    # runtime, so hybrid CPU+GPU tests have a device to run on even though
+    # the runner has no GPU).  Without these the build degrades to CPU-only
+    # and test_cpu_gpu.sh skips the hybrid tests.
+    - name: Install OpenCL toolchain and PoCL runtime
+      run: sudo apt-get update && sudo apt-get install -y ocl-icd-opencl-dev pocl-opencl-icd
     - name: make
       run: make
     - name: make check
